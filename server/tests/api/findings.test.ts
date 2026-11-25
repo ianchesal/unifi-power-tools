@@ -147,6 +147,26 @@ describe('findings API', () => {
     expect(ok.body.status).toBe('attention');
   });
 
+  it('list items embed latest_reopen_note: the most recent reopen note, else null', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1', closed('rule', 'noise'));
+    makeFinding(db, '192.0.2.2', { status: 'attention' });
+    const app = appFor(db);
+    expect((await request(app).post(`/api/findings/${f.id}/reopen`).send({ note: 'first' })).status).toBe(200);
+    expect(
+      (await request(app).post(`/api/findings/${f.id}/close`).send({ kind: 'handled' })).status
+    ).toBe(200);
+    expect((await request(app).post(`/api/findings/${f.id}/reopen`).send({ note: 'block did not take' })).status).toBe(200);
+
+    const byIp = (rows: { entity_key: string; latest_reopen_note: string | null }[], ip: string) =>
+      rows.find((r) => r.entity_key === ip)?.latest_reopen_note;
+    const list = await request(app).get('/api/findings?view=attention');
+    expect(byIp(list.body, '192.0.2.1')).toBe('block did not take');
+    expect(byIp(list.body, '192.0.2.2')).toBeNull();
+    const paged = await request(app).get('/api/findings?view=attention&limit=10');
+    expect(byIp(paged.body.items, '192.0.2.1')).toBe('block did not take');
+  });
+
   it('POST reanalyze moves closed → triaging and queues one pending request', async () => {
     const db = openLensDb(':memory:');
     const f = makeFinding(db, '192.0.2.1', closed('human', 'ok'));

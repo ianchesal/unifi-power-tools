@@ -62,3 +62,24 @@ export function listHistory(db: LensDb, findingId: number): FindingHistoryRow[] 
     .prepare('SELECT * FROM finding_history WHERE finding_id = ? ORDER BY at ASC, id ASC')
     .all(findingId) as unknown as FindingHistoryRow[];
 }
+
+// The note of each finding's most recent human_reopened row, in one query.
+// Findings never reopened are absent from the map.
+export function latestReopenNotes(db: LensDb, findingIds: number[]): Map<number, string | null> {
+  const out = new Map<number, string | null>();
+  if (findingIds.length === 0) return out;
+  const placeholders = findingIds.map(() => '?').join(', ');
+  const rows = db.conn
+    .prepare(
+      `SELECT finding_id, note FROM (
+         SELECT finding_id, note, ROW_NUMBER() OVER (
+           PARTITION BY finding_id ORDER BY at DESC, id DESC
+         ) AS rn
+         FROM finding_history
+         WHERE kind = 'human_reopened' AND finding_id IN (${placeholders})
+       ) WHERE rn = 1`
+    )
+    .all(...findingIds) as { finding_id: number; note: string | null }[];
+  for (const r of rows) out.set(r.finding_id, r.note);
+  return out;
+}

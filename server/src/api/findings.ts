@@ -5,7 +5,7 @@ import { FindingNotFoundError, TransitionError } from '../analysis/findings.js';
 import { splitSignatureKey } from '../analysis/newEntity.js';
 import { humanClose, humanReopen, reanalyze } from '../analysis/pipeline.js';
 import { type AnalysisSummaryRow, latestAnsweredAnalyses } from '../db/analysisRequestsStore.js';
-import { listHistory } from '../db/findingHistoryStore.js';
+import { latestReopenNotes, listHistory } from '../db/findingHistoryStore.js';
 import {
   closedCountsSince,
   countFindings,
@@ -33,6 +33,8 @@ const ReopenBody = z.object({ note: z.string().trim().min(1, 'note is required')
 
 export type FindingListItem = FindingWithDisplayName & {
   latest_analysis: AnalysisSummaryRow | null;
+  // Note of the most recent "This was wrong" reopen, or null if never reopened.
+  latest_reopen_note: string | null;
 };
 
 export type FindingWithDisplayName = Finding & { display_name?: string | null };
@@ -66,13 +68,17 @@ export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Rou
   const router = Router();
 
   // Attaches each finding's latest answered analysis (the store already leaves
-  // out the bulky `context` bundle, which is for the MCP handoff only).
+  // out the bulky `context` bundle, which is for the MCP handoff only) and its
+  // latest reopen note, so the dashboard needs no per-card calls on load.
   function withAnalyses(findings: FindingWithDisplayName[]): FindingListItem[] {
-    const latest = latestAnsweredAnalyses(
-      lensDb,
-      findings.map((f) => f.id as number)
-    );
-    return findings.map((f) => ({ ...f, latest_analysis: latest.get(f.id as number) ?? null }));
+    const ids = findings.map((f) => f.id as number);
+    const latest = latestAnsweredAnalyses(lensDb, ids);
+    const reopenNotes = latestReopenNotes(lensDb, ids);
+    return findings.map((f) => ({
+      ...f,
+      latest_analysis: latest.get(f.id as number) ?? null,
+      latest_reopen_note: reopenNotes.get(f.id as number) ?? null,
+    }));
   }
 
   router.get('/findings', (req, res) => {
