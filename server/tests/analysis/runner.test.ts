@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { openLensDb } from '../../src/db/lensDb.js';
-import { listFindings, markSeenSignature, markSeenSourceIp, upsertFinding } from '../../src/db/findingsStore.js';
+import { listFindings, markSeenSignature, markSeenSourceIp, setFindingStatus, upsertFinding } from '../../src/db/findingsStore.js';
 import {
   createAnalysisRequest,
   getAnalysisRequestsForFinding,
@@ -11,6 +11,48 @@ import { applyTrigger } from '../../src/analysis/findings.js';
 import { runDailyAnomalyCheck, runHourlyChecks, runRuleTriageBackfill } from '../../src/analysis/runner.js';
 
 function seededSinkDb(
+  rows: {
+    received_at: string;
+    category: string;
+    signature: string | null;
+    source_ip: string | null;
+    action?: string | null;
+    message?: string | null;
+    dest_ip?: string | null;
+    dest_port?: number | null;
+    source_client_mac?: string | null;
+    source_client_name?: string | null;
+  }[]
+) {
+  const conn = new DatabaseSync(':memory:');
+  conn.exec(
+    `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, category TEXT,
+     signature TEXT, source_ip TEXT, severity INTEGER, action TEXT, message TEXT,
+     dest_ip TEXT, dest_port INTEGER, source_client_name TEXT, source_client_mac TEXT)`
+  );
+  const stmt = conn.prepare(
+    `INSERT INTO events (received_at, category, signature, source_ip, action, message, dest_ip, dest_port, source_client_mac, source_client_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const r of rows) {
+    stmt.run(
+      r.received_at,
+      r.category,
+      r.signature,
+      r.source_ip,
+      r.action ?? null,
+      r.message ?? null,
+      r.dest_ip ?? null,
+      r.dest_port ?? null,
+      r.source_client_mac ?? null,
+      r.source_client_name ?? null
+    );
+  }
+  return { conn };
+}
+
+// Pre-sink-v1.0.3 schema: no client columns.
+function legacySinkDb(
   rows: {
     received_at: string;
     category: string;
@@ -711,5 +753,139 @@ describe('runRuleTriageBackfill', () => {
     const result = runRuleTriageBackfill(deps(sinkDb, lensDb));
 
     expect(result.dismissed).toBe(1);
+  });
+});
+
+describe('client findings', () => {
+  const deps = { lanCidrs: [], trustedAdminNames: [], safeSignaturePrefixes: ['ET DROP'] };
+  const MAC = 'aa:aa:aa:aa:aa:01';
+  const now = new Date('2026-11-25T12:00:00Z');
+  const clientRow = (received_at: string, extra: Record<string, unknown> = {}) => ({
+    received_at,
+    category: 'ips_alert',
+    signature: 'ET MALWARE VenomRAT',
+    source_ip: null,
+    source_client_mac: MAC,
+    source_client_name: 'tranquility',
+    ...extra,
+  });
+  const clientFindings = (lensDb: ReturnType<typeof openLensDb>) =>
+    listFindings(lensDb).filter((f) => f.entity_type === 'client');
+
+  it('raises a client finding for a client-only Security alert', () => {
+    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+
+    const [finding] = clientFindings(lensDb);
+    expect(finding.entity_key).toBe(MAC);
+    expect(finding.triggers.map((t) => t.type).sort()).toEqual(['internal_source', 'new_client']);
+    expect(finding.severity_score).toBe(4);
+    expect(finding.status).toBe('new');
+  });
+
+  it('seeds client findings from all sink history on first run', () => {
+    const sinkDb = seededSinkDb([clientRow('2026-09-01T00:00:00Z')]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+
+    expect(clientFindings(lensDb).map((f) => f.entity_key)).toEqual([MAC]);
+  });
+
+  it('does not re-add new_client for an already-seen client', () => {
+    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, new Date(now.getTime() + 3600_000));
+
+    const [finding] = clientFindings(lensDb);
+    expect(finding.triggers.filter((t) => t.type === 'new_client')).toHaveLength(1);
+  });
+
+  it('keeps a dismissed client finding dismissed on fresh activity, but reopens on repeat_offender', () => {
+    const later = new Date(now.getTime() + 3600_000);
+    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+    setFindingStatus(lensDb, clientFindings(lensDb)[0].id as number, 'dismissed');
+
+    const insert = sinkDb.conn.prepare(
+      'INSERT INTO events (received_at, category, signature, source_ip, source_client_mac) VALUES (?, ?, ?, NULL, ?)'
+    );
+    insert.run(later.toISOString(), 'ips_alert', 'ET MALWARE VenomRAT', MAC);
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, later);
+    expect(clientFindings(lensDb)[0].status).toBe('dismissed');
+
+    insert.run('2026-11-22T01:00:00Z', 'ips_alert', 'ET MALWARE VenomRAT', MAC);
+    insert.run('2026-11-23T01:00:00Z', 'ips_alert', 'ET MALWARE VenomRAT', MAC);
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, later);
+    const [finding] = clientFindings(lensDb);
+    expect(finding.status).toBe('new');
+    expect(finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(true);
+  });
+
+  it('ignores non-Security, IP-bearing and name-only client rows', () => {
+    const sinkDb = seededSinkDb([
+      clientRow(now.toISOString(), { source_ip: '192.168.1.26', source_client_mac: 'aa:aa:aa:aa:aa:02' }),
+      clientRow(now.toISOString(), { category: 'internet_and_wan', source_client_mac: 'aa:aa:aa:aa:aa:03' }),
+      clientRow(now.toISOString(), { source_client_mac: null, source_client_name: 'nameonly' }),
+    ]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+
+    expect(clientFindings(lensDb)).toEqual([]);
+    expect(listFindings(lensDb).some((f) => f.entity_type === 'source_ip' && f.entity_key === '192.168.1.26')).toBe(true);
+  });
+
+  it('flags a client repeat offender and lapses it when it drops out of the window', () => {
+    const sinkDb = seededSinkDb([
+      clientRow('2026-11-23T01:00:00Z'),
+      clientRow('2026-11-24T01:00:00Z'),
+      clientRow('2026-11-25T01:00:00Z'),
+    ]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+    const repeat = () => clientFindings(lensDb)[0].triggers.find((t) => t.type === 'repeat_offender');
+    expect(repeat()?.active).toBe(true);
+
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, new Date('2026-12-15T12:00:00Z'));
+    expect(repeat()?.active).toBe(false);
+  });
+
+  it('counts only NULL-IP rows toward client repeat-offender days', () => {
+    const sinkDb = seededSinkDb([
+      clientRow('2026-11-23T01:00:00Z', { source_ip: '192.168.1.26' }),
+      clientRow('2026-11-24T01:00:00Z'),
+      clientRow('2026-11-25T01:00:00Z'),
+    ]);
+    const lensDb = openLensDb(':memory:');
+    runHourlyChecks({ sinkDb, lensDb, ...deps }, now);
+
+    const [finding] = clientFindings(lensDb);
+    expect(finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(false);
+  });
+
+  it('still produces IP and signature findings on a pre-v1.0.3 sink', () => {
+    const sinkDb = legacySinkDb([
+      { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
+    ]);
+    const lensDb = openLensDb(':memory:');
+    expect(() => runHourlyChecks({ sinkDb, lensDb, ...deps }, now)).not.toThrow();
+
+    const types = listFindings(lensDb).flatMap((f) => f.triggers.map((t) => t.type));
+    expect(types).toContain('new_signature');
+    expect(types).toContain('new_source_ip');
+    expect(clientFindings(lensDb)).toEqual([]);
+  });
+
+  it('runRuleTriageBackfill skips client findings', () => {
+    const sinkDb = seededSinkDb([]);
+    const lensDb = openLensDb(':memory:');
+    upsertFinding(lensDb, applyTrigger(null, 'new_client', now.toISOString(), 'client', MAC));
+
+    const result = runRuleTriageBackfill({ sinkDb, lensDb, ...deps });
+    expect(result.checked).toBe(0);
+    expect(result.dismissed).toBe(0);
+    expect(clientFindings(lensDb)[0].status).toBe('new');
   });
 });
