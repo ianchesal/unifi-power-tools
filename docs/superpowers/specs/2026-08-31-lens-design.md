@@ -138,6 +138,12 @@ situation. `triggers` is an array of `{type, first_seen, last_seen, active}`
 records, not a flat list of type strings — `active` is what auto-resolve
 (below) evaluates per trigger.
 
+> **Superseded in part:** the `new`/`acknowledged`/`dismissed`/`resolved` status
+> set and the auto-resolve/escalation rules below were replaced by the
+> `triaging`/`attention`/`closed` pipeline; see
+> `2026-11-25-findings-triage-redesign-design.md`. Triggers and severity
+> scoring still work as described here.
+
 `findings` schema: type/entity, first_seen, last_seen, `triggers` (array,
 see above), `severity_score`, `status` (`new` / `acknowledged` /
 `dismissed` / `resolved`). `severity_score` is computed from *which*
