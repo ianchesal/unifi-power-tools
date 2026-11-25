@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fetchJson } from '../api';
 import { EventsModal } from './EventsModal';
-import { GlobeIcon, SeverityIcon, SignatureIcon, STANDING_TRIGGER_TYPES, TRIGGER_ICONS, TRIGGER_LABELS } from '../icons';
+import { ClientIcon, GlobeIcon, SeverityIcon, SignatureIcon, STANDING_TRIGGER_TYPES, TRIGGER_ICONS, TRIGGER_LABELS } from '../icons';
 import { severityBand } from '../severity';
 
 interface Trigger {
@@ -13,6 +13,8 @@ interface Finding {
   id: number;
   entity_type: string;
   entity_key: string;
+  // Client findings only: latest known client name for the MAC (null if unknown).
+  display_name?: string | null;
   triggers: Trigger[];
   severity_score: number;
   status: string;
@@ -36,7 +38,9 @@ const RISK_STYLE: Record<string, { bg: string; color: string }> = {
 };
 
 function entityIcon(entityType: string) {
-  return entityType === 'signature' ? <SignatureIcon /> : <GlobeIcon />;
+  if (entityType === 'signature') return <SignatureIcon />;
+  if (entityType === 'client') return <ClientIcon />;
+  return <GlobeIcon />;
 }
 
 function relativeTime(iso: string | undefined): string | null {
@@ -169,7 +173,9 @@ export function FindingsList({ refreshKey }: { refreshKey: number }) {
                 <div className="finding-id-row">
                   <div className="entity-type-icon">{entityIcon(f.entity_type)}</div>
                   <div>
-                    <div className="entity-key">{f.entity_key}</div>
+                    <div className="entity-key">
+                      {f.display_name ? `${f.display_name} · ${f.entity_key}` : f.entity_key}
+                    </div>
                     <div className="entity-type">{f.entity_type.replace('_', ' ')}</div>
                   </div>
                   <span className={`status-badge ${f.status}`}>{f.status}</span>

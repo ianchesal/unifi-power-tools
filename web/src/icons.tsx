@@ -31,6 +31,15 @@ export function GlobeIcon({ size = 16 }: IconProps) {
   );
 }
 
+export function ClientIcon({ size = 16 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <rect x="3" y="4.5" width="18" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M8.5 20h7M12 16.5V20" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function SignatureIcon({ size = 16 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -132,6 +141,7 @@ export const TRIGGER_ICONS: Record<string, (props: IconProps) => ReactElement> =
   repeat_offender: RepeatIcon,
   new_signature: NewSignatureIcon,
   new_source_ip: GlobeIcon,
+  new_client: ClientIcon,
   internal_source: InternalSourceIcon,
 };
 
@@ -140,6 +150,7 @@ export const TRIGGER_LABELS: Record<string, string> = {
   repeat_offender: 'Repeat offender',
   new_signature: 'New signature',
   new_source_ip: 'New source IP',
+  new_client: 'New client',
   internal_source: 'Internal source',
 };
 

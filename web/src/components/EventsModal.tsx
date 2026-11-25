@@ -7,6 +7,8 @@ interface StoredEvent {
   category: string;
   severity: number | null;
   source_ip: string | null;
+  // Present on client-finding activity (sink >= v1.0.3): the LAN host UniFi named instead of an IP.
+  source_client_name?: string | null;
   dest_ip: string | null;
   action: string | null;
   signature: string | null;
@@ -63,9 +65,9 @@ export function EventsModal({ findingId, onClose }: { findingId: number; onClose
                   <span className="timestamp">{new Date(e.received_at).toLocaleString()}</span>
                   {e.action && <span className={`event-action ${e.action}`}>{e.action}</span>}
                 </div>
-                {(e.source_ip || e.dest_ip) && (
+                {(e.source_ip || e.source_client_name || e.dest_ip) && (
                   <div className="event-flow">
-                    {e.source_ip ?? '—'} → {e.dest_ip ?? '—'}
+                    {e.source_ip ?? e.source_client_name ?? '—'} → {e.dest_ip ?? '—'}
                   </div>
                 )}
                 {e.signature && <div className="event-signature">{e.signature}</div>}
