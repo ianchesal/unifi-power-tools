@@ -1,14 +1,47 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import type { Finding } from '../analysis/findings.js';
 import { splitSignatureKey } from '../analysis/newEntity.js';
 import { countFindings, listFindings, setFindingStatus } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
-import { eventsForSignature, eventsForSourceIp } from '../db/sinkQueries.js';
+import {
+  eventsForClientMac,
+  eventsForSignature,
+  eventsForSourceIp,
+  latestClientNames,
+} from '../db/sinkQueries.js';
 
 const StatusUpdate = z.object({
   status: z.enum(['acknowledged', 'dismissed']),
 });
+
+export type FindingWithDisplayName = Finding & { display_name?: string | null };
+
+// Attaches a human-readable `display_name` to client findings: the most recent
+// non-null source_client_name the sink has for that MAC, looked up per request
+// (never stored, so a renamed client shows its current name). Non-client
+// findings are returned without the key. With no sink, or if the lookup fails
+// (e.g. a pre-v1.0.3 sink without the client columns), client findings get
+// `display_name: null` rather than failing the request.
+export function withDisplayNames(
+  sinkDb: SinkDb | null,
+  findings: Finding[]
+): FindingWithDisplayName[] {
+  const macs = findings.filter((f) => f.entity_type === 'client').map((f) => f.entity_key);
+  if (macs.length === 0) return findings;
+  let names = new Map<string, string>();
+  if (sinkDb) {
+    try {
+      names = latestClientNames(sinkDb, macs);
+    } catch (err) {
+      console.error('Client display-name lookup failed:', err);
+    }
+  }
+  return findings.map((f) =>
+    f.entity_type === 'client' ? { ...f, display_name: names.get(f.entity_key) ?? null } : f
+  );
+}
 
 export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Router {
   const router = Router();
@@ -31,14 +64,14 @@ export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Rou
     // getting the full unpaginated array they always have.
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
     if (limitRaw === undefined) {
-      res.json(listFindings(lensDb, filter));
+      res.json(withDisplayNames(sinkDb, listFindings(lensDb, filter)));
       return;
     }
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 20;
     const offsetRaw = typeof req.query.offset === 'string' ? Number(req.query.offset) : 0;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
     res.json({
-      items: listFindings(lensDb, { ...filter, limit, offset }),
+      items: withDisplayNames(sinkDb, listFindings(lensDb, { ...filter, limit, offset })),
       total: countFindings(lensDb, filter),
     });
   });
@@ -73,6 +106,10 @@ export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Rou
     }
     if (finding.entity_type === 'source_ip') {
       res.json(eventsForSourceIp(sinkDb, finding.entity_key));
+      return;
+    }
+    if (finding.entity_type === 'client') {
+      res.json(eventsForClientMac(sinkDb, finding.entity_key));
       return;
     }
     const { category, signature } = splitSignatureKey(finding.entity_key);

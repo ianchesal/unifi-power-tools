@@ -2,10 +2,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { openSinkDb, type SinkDb } from '../../src/db/sinkDb.js';
 import {
+  allClientMacs,
   auditCandidateEvents,
+  clientDayCounts,
+  clientMacsSince,
+  eventsForClientMac,
   eventsForSignature,
   eventsForSourceIp,
   eventsOverTime,
+  latestClientNames,
   listEvents,
   severityDistribution,
   signatureEventCounts,
@@ -167,5 +172,78 @@ describe('auditCandidateEvents', () => {
     ]);
     const events = auditCandidateEvents(db, '1.2.3.4', '2026-08-31T00:00:00Z', '2026-09-01T00:00:00Z');
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('client queries', () => {
+  function clientDb(): SinkDb {
+    const conn = new DatabaseSync(':memory:');
+    conn.exec(
+      `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
+       category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
+       dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
+       signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER,
+       source_client_name TEXT, source_client_mac TEXT, dest_client_name TEXT, dest_client_mac TEXT)`
+    );
+    const stmt = conn.prepare(
+      `INSERT INTO events (received_at, category, signature, source_ip, source_client_mac, source_client_name, raw, parsed)
+       VALUES (?, ?, 'sig', ?, ?, ?, 'raw-line', 1)`
+    );
+    // A: client-only ips_alert
+    stmt.run('2026-11-01T00:00:00Z', 'ips_alert', null, 'aa:aa:aa:aa:aa:01', 'tranquility');
+    // B: same MAC, later, renamed
+    stmt.run('2026-11-20T00:00:00Z', 'firewall_block', null, 'aa:aa:aa:aa:aa:01', 'tranq-renamed');
+    // C: has an IP -> not client-only
+    stmt.run('2026-11-21T00:00:00Z', 'ips_alert', '192.168.1.26', 'aa:aa:aa:aa:aa:02', 'withip');
+    // D: not a Security category
+    stmt.run('2026-11-21T00:00:00Z', 'internet_and_wan', null, 'aa:aa:aa:aa:aa:03', 'wan');
+    // E: name but no MAC
+    stmt.run('2026-11-21T00:00:00Z', 'ips_alert', null, null, 'nameonly');
+    // F: client-only honeypot
+    stmt.run('2026-11-24T00:00:00Z', 'honeypot', null, 'aa:aa:aa:aa:aa:04', null);
+    return { conn };
+  }
+
+  it('allClientMacs returns distinct MACs of client-only Security events across all history', () => {
+    expect(allClientMacs(clientDb()).sort()).toEqual(['aa:aa:aa:aa:aa:01', 'aa:aa:aa:aa:aa:04']);
+  });
+
+  it('clientMacsSince restricts to the window', () => {
+    const db = clientDb();
+    expect(clientMacsSince(db, '2026-11-15T00:00:00Z').sort()).toEqual([
+      'aa:aa:aa:aa:aa:01',
+      'aa:aa:aa:aa:aa:04',
+    ]);
+    expect(clientMacsSince(db, '2026-11-22T00:00:00Z')).toEqual(['aa:aa:aa:aa:aa:04']);
+  });
+
+  it('clientDayCounts counts distinct active days per MAC', () => {
+    expect(clientDayCounts(clientDb(), '2026-10-01T00:00:00Z')).toContainEqual({
+      mac: 'aa:aa:aa:aa:aa:01',
+      days: 2,
+    });
+  });
+
+  it('latestClientNames returns the most recent non-null name per MAC', () => {
+    const db = clientDb();
+    expect(latestClientNames(db, ['aa:aa:aa:aa:aa:01']).get('aa:aa:aa:aa:aa:01')).toBe('tranq-renamed');
+    expect(latestClientNames(db, []).size).toBe(0);
+  });
+
+  it('latestClientNames picks the newest by received_at, not insertion order', () => {
+    const db = clientDb();
+    db.conn
+      .prepare(
+        `INSERT INTO events (received_at, category, source_client_mac, source_client_name, raw, parsed)
+         VALUES ('2026-10-01T00:00:00Z', 'ips_alert', 'aa:aa:aa:aa:aa:01', 'ancient-name', 'raw-line', 1)`
+      )
+      .run();
+    expect(latestClientNames(db, ['aa:aa:aa:aa:aa:01']).get('aa:aa:aa:aa:aa:01')).toBe('tranq-renamed');
+  });
+
+  it('eventsForClientMac returns client-only events for the MAC, newest first, with client columns', () => {
+    const events = eventsForClientMac(clientDb(), 'aa:aa:aa:aa:aa:01');
+    expect(events).toHaveLength(2);
+    expect(events[0].source_client_name).toBe('tranq-renamed');
   });
 });

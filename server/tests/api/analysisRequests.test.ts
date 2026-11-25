@@ -189,3 +189,38 @@ describe('analysis-requests API', () => {
     expect(context.recentEvents).toEqual([]);
   });
 });
+
+describe('analysis-requests API — client findings', () => {
+  it('builds analysis context for a client finding from its MAC', async () => {
+    const MAC = 'aa:aa:aa:aa:aa:01';
+    const conn = new DatabaseSync(':memory:');
+    conn.exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
+  category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
+  dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
+  signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER,
+  source_client_name TEXT, source_client_mac TEXT, dest_client_name TEXT, dest_client_mac TEXT)`);
+    conn
+      .prepare(
+        `INSERT INTO events (received_at, category, signature, source_ip, source_client_mac, source_client_name, raw, parsed)
+         VALUES ('2026-11-25T00:00:00Z', 'ips_alert', 'sig', NULL, ?, 'tranquility', 'raw-line', 1)`
+      )
+      .run(MAC);
+    const lensDb = openLensDb(':memory:');
+    const finding = upsertFinding(lensDb, applyTrigger(null, 'new_client', 't0', 'client', MAC));
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createAnalysisRequestsRouter(lensDb, createUnifiMcpClient(null), { conn }));
+
+    const analyzeRes = await request(app).post(`/api/findings/${finding.id}/analyze`);
+    expect(analyzeRes.status).toBe(200);
+    const stored = lensDb.conn
+      .prepare('SELECT context FROM analysis_requests WHERE id = ?')
+      .get(analyzeRes.body.id) as { context: string };
+    const context = JSON.parse(stored.context);
+    expect(context.recentEvents).toHaveLength(1);
+    expect(context.recentEvents[0].source_client_mac).toBe(MAC);
+    expect(context.knownClient).toBeNull();
+    expect(context.finding.display_name).toBe('tranquility');
+  });
+});

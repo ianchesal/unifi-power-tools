@@ -83,7 +83,8 @@ shadow them.
   own DB (`server/src/db/lensDb.ts`). Holds `baselines` (rolling per-
   signature daily counts for anomaly detection), `seen_signatures` /
   `seen_source_ips` (first-seen tracking), `findings`, and
-  `analysis_requests` (the Claude Code handoff queue).
+  `analysis_requests` (the Claude Code handoff queue), plus `seen_clients`
+  (first-seen tracking for client findings, below).
 
 ### Analysis engine (`server/src/analysis/`)
 
@@ -103,6 +104,27 @@ Findings that predate a key's addition to the list are cleaned up by the
 admin backfill, via an `ignored_signature` rule checked first in
 `tryRuleTriage`'s signature branch (no completeness counts — the key alone
 pins it).
+
+**Client findings** (`entity_type: 'client'`, keyed by `source_client_mac`
+exactly as the sink stores it — lowercase, never re-normalised, never a
+name) cover LAN hosts UniFi identified only by name/MAC, which sink >= v1.0.3
+stores with `source_ip` NULL. Only *client-only Security events* back them:
+`source_ip IS NULL AND source_client_mac IS NOT NULL AND category IN
+CLIENT_SECURITY_CATEGORIES` (`newEntity.ts`), ignored signatures excluded.
+`runner.ts`'s `client` check computes new clients as `allClientMacs` (all
+sink history) minus `seen_clients`, so the first run after deploy seeds
+findings for historical client-only alerts; each gets `new_client` +
+`internal_source` (always — LAN by definition; it's there so clients rank
+with internal IPs). `repeat-offender-client` mirrors the IP repeat-offender
+pass in its own `runCheck`. Client findings never get rule triage:
+`tryRuleTriage` returns early for them and the backfill skips them — without
+that guard a client finding would fall into the signature branch with its
+MAC parsed as a signature key. **Old-sink isolation rule:** only the
+client-only helpers at the bottom of `sinkQueries.ts` may reference the
+`source_client_*` / `dest_client_*` columns; `recentEvents` and every other
+existing query must not, so a pre-v1.0.3 sink loses only client features.
+Client and IP findings for the same host are deliberately not merged (see
+`docs/superpowers/specs/2026-11-25-client-entities-design.md`).
 
 `isAnomalous` (in `baseline.ts`) is deliberately one-sided: only a spike
 above the trailing baseline registers, never a drop. A drop in alert volume

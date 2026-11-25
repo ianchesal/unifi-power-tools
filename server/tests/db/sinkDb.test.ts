@@ -25,4 +25,22 @@ describe('openSinkDb', () => {
     expect(result.ok).toBe(false);
     expect(result.missingColumns).toContain('source_ip');
   });
+
+  it('verifySchema requires the sink v1.0.3 client columns', () => {
+    const conn = new DatabaseSync(':memory:');
+    conn.exec(
+      `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
+       category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
+       dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
+       signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER)`
+    );
+    const result = verifySchema({ conn });
+    expect(result.ok).toBe(false);
+    expect(result.missingColumns).toEqual([
+      'source_client_name',
+      'source_client_mac',
+      'dest_client_name',
+      'dest_client_mac',
+    ]);
+  });
 });

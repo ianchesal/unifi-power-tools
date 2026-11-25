@@ -4,8 +4,8 @@ export interface SinkDb {
   conn: DatabaseSync;
 }
 
-// Columns lens depends on, as of the sink's schema version 1
-// (unifi-siem-sink/src/storage/db.ts MIGRATIONS[0]). If the sink's schema
+// Columns lens depends on, as of sink v1.0.3 (unifi-siem-sink/src/storage/db.ts
+// MIGRATIONS[0] plus the client-identity columns added in v1.0.3). If the sink's schema
 // changes in a way that drops or renames one of these, lens should fail
 // loud via verifySchema() rather than error obscurely on first query.
 const EXPECTED_COLUMNS = [
@@ -27,6 +27,10 @@ const EXPECTED_COLUMNS = [
   'device_host',
   'raw',
   'parsed',
+  'source_client_name',
+  'source_client_mac',
+  'dest_client_name',
+  'dest_client_mac',
 ];
 
 export function openSinkDb(path: string): SinkDb {

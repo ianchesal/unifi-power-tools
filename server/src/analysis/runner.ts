@@ -4,15 +4,20 @@ import {
   hasSeenSignature,
   hasSeenSourceIp,
   listFindings,
+  markSeenClient,
   markSeenSignature,
   markSeenSourceIp,
+  seenClientMacs,
   setFindingStatus,
   upsertFinding,
 } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
 import {
+  allClientMacs,
   auditCandidateEvents,
+  clientDayCounts,
+  clientMacsSince,
   signatureEventCounts,
   sourceIpEventCounts,
 } from '../db/sinkQueries.js';
@@ -21,6 +26,7 @@ import { computeBaseline, isAnomalous } from './baseline.js';
 import { isInternalSource } from './cidr.js';
 import { applyTrigger, type Finding, reevaluateTrigger } from './findings.js';
 import {
+  detectNewClients,
   detectNewSignatures,
   detectNewSourceIps,
   isIgnoredSignature,
@@ -123,6 +129,11 @@ function tryRuleTriage(
   // backfill) tries every rule, unrestricted.
   allowedRules?: RuleName[]
 ): TriageOutcome {
+  // Client findings are backed only by client-only Security events (see
+  // CLIENT_SECURITY_CATEGORIES) and get no rule triage — they always stay for
+  // manual review. Guard explicitly so a client finding never falls into the
+  // signature branch below and has its MAC parsed as a signature key.
+  if (finding.entity_type === 'client') return { matched: false };
   const allowed = (r: RuleName) => !allowedRules || allowedRules.includes(r);
   const prefixClause = deps.safeSignaturePrefixes.map(() => 'signature LIKE ?').join(' OR ');
   const prefixParams = deps.safeSignaturePrefixes.map((p) => `${p}%`);
@@ -189,7 +200,7 @@ function tryRuleTriage(
         }
       }
     }
-  } else {
+  } else if (finding.entity_type === 'signature') {
     const { category, signature } = splitSignatureKey(finding.entity_key);
 
     if (allowed('ignored_signature') && isIgnoredSignature(category, signature)) {
@@ -383,6 +394,45 @@ export function runHourlyChecks(
     return count;
   });
 
+  // Client: LAN hosts UniFi identified only by MAC (source_ip NULL) on
+  // Security events — invisible to the IP-keyed checks above. New clients are
+  // every client MAC in all of sink history minus seen_clients, so the first
+  // run after deploy seeds findings for historical client-only alerts and
+  // later runs behave like the new-source-ip check. Every client gets
+  // internal_source (UniFi-named clients are LAN by definition) so client
+  // findings rank alongside internal IP findings. No rule triage. Only the
+  // client-only queries touch the sink v1.0.3 columns, so on an older sink
+  // this check fails alone.
+  touched += runCheck('client', () => {
+    let count = 0;
+    const newMacs = detectNewClients(allClientMacs(deps.sinkDb), seenClientMacs(deps.lensDb));
+    for (const mac of newMacs) {
+      const withNew = upsertFinding(
+        deps.lensDb,
+        applyTrigger(getFinding(deps.lensDb, 'client', mac), 'new_client', nowIso, 'client', mac)
+      );
+      upsertFinding(deps.lensDb, applyTrigger(withNew, 'internal_source', nowIso, 'client', mac));
+      markSeenClient(deps.lensDb, mac, nowIso);
+      count++;
+    }
+    const newMacSet = new Set(newMacs);
+    for (const mac of clientMacsSince(deps.sinkDb, sinceIso)) {
+      if (newMacSet.has(mac)) continue;
+      upsertFinding(
+        deps.lensDb,
+        applyTrigger(
+          getFinding(deps.lensDb, 'client', mac),
+          'internal_source',
+          nowIso,
+          'client',
+          mac
+        )
+      );
+      count++;
+    }
+    return count;
+  });
+
   // Repeat-offender: recompute distinct-day activity over the trailing window directly
   // from events.db each run (homelab data volumes make this cheap; avoids incremental-
   // cursor bookkeeping — see spec's "runner queries the window directly" note).
@@ -419,6 +469,42 @@ export function runHourlyChecks(
     for (const finding of listFindings(deps.lensDb)) {
       if (finding.entity_type !== 'source_ip') continue;
       if (activeSustainedIps.has(finding.entity_key)) continue;
+      if (!finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)) continue;
+      upsertFinding(deps.lensDb, reevaluateTrigger(finding, 'repeat_offender', false, nowIso));
+      count++;
+    }
+    return count;
+  });
+
+  // Client repeat-offender: same rule as the IP pass, over client-only rows
+  // keyed by MAC. Its own runCheck so an old sink (no client columns) can't
+  // take the IP pass down with it.
+  touched += runCheck('repeat-offender-client', () => {
+    let count = 0;
+    const windowStart = new Date(
+      now.getTime() - REPEAT_OFFENDER_WINDOW_DAYS * 24 * 3600 * 1000
+    ).toISOString();
+    const macDayCounts = clientDayCounts(deps.sinkDb, windowStart);
+    const activeSustainedMacs = new Set(
+      macDayCounts.filter((r) => isSustained(r.days)).map((r) => r.mac)
+    );
+
+    for (const row of macDayCounts) {
+      const existing = getFinding(deps.lensDb, 'client', row.mac);
+      if (isSustained(row.days)) {
+        upsertFinding(
+          deps.lensDb,
+          applyTrigger(existing, 'repeat_offender', nowIso, 'client', row.mac)
+        );
+        count++;
+      } else if (existing?.triggers.some((t) => t.type === 'repeat_offender' && t.active)) {
+        upsertFinding(deps.lensDb, reevaluateTrigger(existing, 'repeat_offender', false, nowIso));
+        count++;
+      }
+    }
+    for (const finding of listFindings(deps.lensDb)) {
+      if (finding.entity_type !== 'client') continue;
+      if (activeSustainedMacs.has(finding.entity_key)) continue;
       if (!finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)) continue;
       upsertFinding(deps.lensDb, reevaluateTrigger(finding, 'repeat_offender', false, nowIso));
       count++;
@@ -557,8 +643,10 @@ export function runRuleTriageBackfill(deps: RunnerDeps): BackfillResult {
     },
   };
 
+  // Client findings get no rule triage (see tryRuleTriage's guard), so they
+  // aren't candidates at all — keeps `checked` honest.
   const candidates = listFindings(deps.lensDb).filter(
-    (f) => f.status === 'new' || f.status === 'acknowledged'
+    (f) => f.entity_type !== 'client' && (f.status === 'new' || f.status === 'acknowledged')
   );
 
   for (const finding of candidates) {

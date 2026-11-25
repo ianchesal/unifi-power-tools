@@ -51,3 +51,24 @@ export function detectNewSourceIps(
   }
   return [...found];
 }
+
+// Lens categories the sink maps UNIFIcategory = 'Security' to ('security' is
+// its slug fallback for an unmapped Security subtype). Only for these does the
+// sink deliberately leave source_ip NULL when UniFi names the LAN host by
+// client name/MAC alone, so only these rows can back a `client` finding — see
+// docs/superpowers/specs/2026-11-25-client-entities-design.md.
+export const CLIENT_SECURITY_CATEGORIES: readonly string[] = [
+  'ips_alert',
+  'firewall_block',
+  'honeypot',
+  'security',
+];
+
+export function detectNewClients(macs: string[], seen: Set<string>): string[] {
+  const found = new Set<string>();
+  for (const mac of macs) {
+    if (seen.has(mac)) continue;
+    found.add(mac);
+  }
+  return [...found];
+}

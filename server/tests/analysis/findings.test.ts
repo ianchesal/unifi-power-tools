@@ -91,6 +91,14 @@ describe('reevaluateTrigger', () => {
 });
 
 describe('computeSeverityScore', () => {
+  it('weights new_client at 1, so a new internal client scores 4', () => {
+    const triggers: Trigger[] = [
+      { type: 'new_client', first_seen: 't0', last_seen: 't0', active: true },
+      { type: 'internal_source', first_seen: 't0', last_seen: 't0', active: true },
+    ];
+    expect(computeSeverityScore(triggers)).toBe(4);
+  });
+
   it('sums weights of active triggers only', () => {
     const triggers: Trigger[] = [
       { type: 'internal_source', first_seen: 't', last_seen: 't', active: true },

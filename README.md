@@ -44,8 +44,11 @@ before you ever open a chat (via `unifi-siem-lens`).
 
 ## Quick Start (Docker)
 
-Requires `unifi-siem-sink` already running as a container — lens reads its
-event database read-only via `--volumes-from`.
+Requires `unifi-siem-sink` **v1.0.3 or later** already running as a
+container — lens reads its event database read-only via `--volumes-from`.
+Against an older sink, `/health` reports a schema mismatch (the
+`source_client_*` / `dest_client_*` columns) and client findings are
+disabled; IP and signature analysis keeps working.
 
 ### 1. Create a `.env` file
 
@@ -110,6 +113,26 @@ recommendations back — which then show up next to the finding.
 | `get_pending_analyses` (MCP) | List analysis requests queued from the dashboard, awaiting a recommendation. |
 | `get_analysis_context` (MCP) | Full context for one request: the finding, its trigger/baseline history, and the relevant raw events. |
 | `submit_analysis` (MCP) | Post a recommendation + risk level back for a pending request. |
+
+## Client findings
+
+Some UniFi Security events (IPS alerts, firewall blocks, honeypot hits)
+identify the LAN host only by client name/MAC, with no IP — the sink stores
+those with `source_ip` NULL and the host in `source_client_name` /
+`source_client_mac`. Lens turns each such MAC into a `client` finding (shown
+with its latest known client name next to the MAC):
+
+- `new_client` the first time a MAC appears, plus `internal_source` (a
+  UniFi-named client is on the LAN by definition), so a new client ranks
+  alongside an internal IP finding.
+- `repeat_offender` when the client is active on 3+ distinct days in 14,
+  counting only those client-only rows.
+
+On the first run after upgrading, every client already in the sink's history
+gets a finding, so past client-only alerts surface once for review. Client
+findings are never auto-triaged by the rules below, and are tracked
+separately from any IP finding for the same host (IPs change under DHCP;
+MACs don't).
 
 ## Rule-based auto-triage
 
