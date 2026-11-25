@@ -120,10 +120,11 @@ with internal IPs). `repeat-offender-client` mirrors the IP repeat-offender
 pass in its own `runCheck`. Client findings never get rule triage:
 `matchRules` returns null for them and the backfill skips them, so they are
 always queued for AI — without that guard a client finding would fall into
-the signature branch with its MAC parsed as a signature key. **Old-sink isolation rule:** only the
-client-only helpers at the bottom of `sinkQueries.ts` may reference the
-`source_client_*` / `dest_client_*` columns; `recentEvents` and every other
-existing query must not, so a pre-v1.0.3 sink loses only client features.
+the signature branch with its MAC parsed as a signature key.
+**Old-sink isolation rule:** only the client-only helpers at the bottom of
+`sinkQueries.ts` may reference the `source_client_*` / `dest_client_*`
+columns; `recentEvents` and every other existing query must not, so a
+pre-v1.0.3 sink loses only client features.
 Client and IP findings for the same host are deliberately not merged (see
 `docs/superpowers/specs/2026-11-25-client-entities-design.md`).
 

@@ -106,7 +106,8 @@ This skill only drains the **pending MCP queue**
    `recommended_action`, a recheck lacks `why_now`, or a `close` has no
    citation while unblocked IPS alerts exist since the last decision — or
    the sink can't be checked at all (it fails closed). Since citations aren't
-   available yet, a rejected close means one of those alerts wasn't blocked:
+   available yet, a rejected close means an alert wasn't blocked, or the
+   sink couldn't be checked:
    either submit `attention` with an action that addresses it, or report the
    rejection to the user. Never work around the guardrail.
 

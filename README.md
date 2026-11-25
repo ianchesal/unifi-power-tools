@@ -115,7 +115,7 @@ next to the finding.
 | `GET /api/findings/:id/history` | A finding's audit trail (created, rule/AI/human decisions, rechecks, reopens). |
 | `GET /api/findings/:id/activity` | The raw sink events behind a finding. |
 | `POST /api/findings/:id/close` | Operator closes an `attention` finding: `{ kind: "handled" \| "not_concern", note? }`. |
-| `POST /api/findings/:id/reopen` | Operator reopens a `closed` finding back into the pipeline: `{ note }` (required). |
+| `POST /api/findings/:id/reopen` | Operator reopens a `closed` finding back to needs attention: `{ note }` (required). |
 | `POST /api/findings/:id/reanalyze` | Re-queue a `closed` or `attention` finding for AI analysis. |
 | `GET /api/analysis-requests` | Pending requests, or all of a finding's with `?findingId=`. |
 | `GET /api/queue` | AI queue stats for the queue strip. |
