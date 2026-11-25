@@ -9,14 +9,12 @@ interface EventsRow {
   count: number;
 }
 
-export function KpiStats({ refreshKey }: { refreshKey: number }) {
+export function KpiStats({ refreshKey, queue }: { refreshKey: number; queue: QueueStats | null }) {
   const [summary, setSummary] = useState<FindingsSummary | null>(null);
-  const [queue, setQueue] = useState<QueueStats | null>(null);
   const [eventRows, setEventRows] = useState<EventsRow[] | null>(null);
 
   useEffect(() => {
     fetchJson<FindingsSummary>('/api/findings-summary').then(setSummary).catch(() => setSummary(null));
-    fetchJson<QueueStats>('/api/queue').then(setQueue).catch(() => setQueue(null));
   }, [refreshKey]);
 
   useEffect(() => {

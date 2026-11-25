@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 interface BackfillResult {
   checked: number;
-  dismissed: number;
+  closed: number;
   byRule: {
     admin_login: number;
     operational_noise: number;
@@ -57,9 +57,9 @@ export function AdminPage() {
           <h2 className="section-title">Rule-triage backfill</h2>
         </div>
         <p style={{ color: 'var(--text-secondary)' }}>
-          Re-checks existing new/acknowledged findings against the auto-triage rules (admin
-          logins, WAN noise, blocklist scans). Findings created before rule-based triage existed
-          — or before it was configured — never got a rule pass; this catches them up.
+          Re-checks findings still waiting on AI analysis against the auto-triage rules (admin
+          logins, WAN noise, blocklist scans). Findings created before a rule existed — or before
+          it was configured — never got a rule pass; this catches them up and closes any that match.
         </p>
         <button className="btn btn-primary" type="button" disabled={running} onClick={runBackfill}>
           {running ? 'Running…' : 'Run backfill'}
@@ -70,9 +70,9 @@ export function AdminPage() {
         {result && (
           <div className="analysis-panel">
             <p className="analysis-body">
-              Checked {result.checked} finding{result.checked === 1 ? '' : 's'} · {result.dismissed} auto-dismissed
+              Checked {result.checked} finding{result.checked === 1 ? '' : 's'} · {result.closed} auto-closed
             </p>
-            {result.dismissed > 0 && (
+            {result.closed > 0 && (
               <ul>
                 {(Object.entries(result.byRule) as [keyof BackfillResult['byRule'], number][])
                   .filter(([, count]) => count > 0)

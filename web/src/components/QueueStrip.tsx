@@ -6,15 +6,13 @@ import type { Finding, PendingAnalysis, QueueStats } from '../types';
 // Phase B swaps this for the slash command.
 export const TRIAGE_HINT = 'ask Claude Code to work the unifi-siem-lens analysis queue';
 
-export function QueueStrip({ refreshKey }: { refreshKey: number }) {
-  const [queue, setQueue] = useState<QueueStats | null>(null);
+// `queue` is fetched once per refresh by the parent (shared with KpiStats),
+// which keeps the last good value on a failed refresh.
+export function QueueStrip({ refreshKey, queue }: { refreshKey: number; queue: QueueStats | null }) {
   const [expanded, setExpanded] = useState(false);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [recheckIds, setRecheckIds] = useState<Set<number>>(new Set());
-
-  useEffect(() => {
-    fetchJson<QueueStats>('/api/queue').then(setQueue).catch(() => setQueue(null));
-  }, [refreshKey]);
+  const [listError, setListError] = useState(false);
 
   // Item details load only while expanded: two calls total, never per item.
   useEffect(() => {
@@ -26,10 +24,12 @@ export function QueueStrip({ refreshKey }: { refreshKey: number }) {
       .then(([f, pending]) => {
         setFindings(f);
         setRecheckIds(new Set(pending.filter((p) => p.is_recheck === 1).map((p) => p.finding_id)));
+        setListError(false);
       })
       .catch(() => {
         setFindings([]);
         setRecheckIds(new Set());
+        setListError(true);
       });
   }, [expanded, refreshKey]);
 
@@ -51,7 +51,8 @@ export function QueueStrip({ refreshKey }: { refreshKey: number }) {
         {queue.count} finding{queue.count === 1 ? '' : 's'} waiting for AI analysis
         {oldest ? ` · oldest ${oldest}` : ''} · {TRIAGE_HINT}
       </button>
-      {expanded && (
+      {expanded && listError && <p className="queue-strip-error">Couldn't load the queued findings.</p>}
+      {expanded && !listError && (
         <ul className="queue-strip-list">
           {findings.map((f) => (
             <li key={f.id}>

@@ -48,11 +48,26 @@ export interface Finding {
   latest_analysis: AnalysisRequest | null;
 }
 
+export type HistoryKind =
+  | 'created'
+  | 'trigger_added'
+  | 'rule_closed'
+  | 'queued'
+  | 'ai_closed'
+  | 'ai_attention'
+  | 'human_closed_handled'
+  | 'human_closed_not_concern'
+  | 'human_reopened'
+  | 'human_reanalyze'
+  | 'recheck_rule_still_closed'
+  | 'recheck_queued'
+  | 'request_cancelled';
+
 export interface HistoryEntry {
   id: number;
   finding_id: number;
   at: string;
-  kind: string;
+  kind: HistoryKind;
   actor: ClosedBy;
   summary: string;
   note: string | null;

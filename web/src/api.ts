@@ -33,3 +33,9 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
   }
   return res.json() as Promise<T>;
 }
+
+// The message to show inline for a failed action: ApiError carries the
+// server's `error` text.
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
