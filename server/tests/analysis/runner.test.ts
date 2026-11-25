@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { openLensDb, type LensDb } from '../../src/db/lensDb.js';
 import {
@@ -156,6 +156,36 @@ describe('runHourlyChecks', () => {
       const req = expectQueued(lensDb, f);
       expect(req.context).toBe('{}');
       expect(req.is_recheck).toBe(0);
+      expect(kinds(lensDb, f)).toEqual(['created', 'queued']);
+    }
+  });
+
+  it('queues a new finding for AI when rule matching throws (sink error fails towards the AI)', () => {
+    const now = new Date('2026-08-31T12:00:00Z');
+    const sinkDb = seededSinkDb([
+      { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET DROP Spamhaus', source_ip: '203.0.113.5' },
+    ]);
+    // Only the rule-completeness COUNT queries throw; the hourly scan itself works.
+    const realPrepare = sinkDb.conn.prepare.bind(sinkDb.conn);
+    sinkDb.conn.prepare = ((sql: string) => {
+      if (sql.includes('COUNT(*) as n FROM events WHERE')) throw new Error('database disk image is malformed');
+      return realPrepare(sql);
+    }) as typeof sinkDb.conn.prepare;
+    const lensDb = openLensDb(':memory:');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringContaining('Rule matching failed'),
+        expect.any(Error)
+      );
+    } finally {
+      errors.mockRestore();
+    }
+
+    for (const key of ['203.0.113.5', 'ips_alert|ET DROP Spamhaus']) {
+      const f = byKey(lensDb, key);
+      expectQueued(lensDb, f);
       expect(kinds(lensDb, f)).toEqual(['created', 'queued']);
     }
   });

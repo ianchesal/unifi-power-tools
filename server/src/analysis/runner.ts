@@ -147,7 +147,18 @@ function routeToPipeline(
   nowIso: string,
   allowedRules?: RuleName[]
 ): void {
-  const match = matchRules(deps, finding, sinceIso, untilIso, allowedRules);
+  // Fail towards the AI: the finding is already committed as triaging and its
+  // entity marked seen, so if a sink query throws here and we let it escape,
+  // nothing would ever route it again (stuck triaging with no request).
+  let match: ReturnType<typeof matchRules> = null;
+  try {
+    match = matchRules(deps, finding, sinceIso, untilIso, allowedRules);
+  } catch (err) {
+    console.error(
+      `Rule matching failed for ${finding.entity_type} ${finding.entity_key}; queueing for AI:`,
+      err
+    );
+  }
   if (match) closeByRule(deps.lensDb, finding, match, nowIso);
   else queueForAnalysis(deps.lensDb, finding, nowIso);
 }
