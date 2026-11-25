@@ -3,6 +3,7 @@ import { errorMessage, fetchJson, postJson } from '../api';
 import { relativeTime } from '../format';
 import type { ClosedBy, Finding } from '../types';
 import { FindingIdentity } from './FindingIdentity';
+import { HistoryDetails } from './HistoryTimeline';
 import { NoteBox } from './NoteBox';
 
 const PAGE_SIZE = 20;
@@ -204,6 +205,7 @@ function ClosedRow({
         />
       )}
       {error && <p className="action-error">{error}</p>}
+      <HistoryDetails finding={finding} />
     </div>
   );
 }

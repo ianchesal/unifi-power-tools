@@ -46,6 +46,8 @@ export interface Finding {
   last_triaged_at: string | null;
   reopen_count: number;
   latest_analysis: AnalysisRequest | null;
+  // Note of the most recent "This was wrong" reopen, or null if never reopened.
+  latest_reopen_note: string | null;
 }
 
 export type HistoryKind =

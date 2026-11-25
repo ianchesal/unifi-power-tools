@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
-import { errorMessage, fetchJson, postJson } from '../api';
+import { useState } from 'react';
+import { errorMessage, postJson } from '../api';
 import { relativeTime } from '../format';
 import { severityBand } from '../severity';
-import type { Finding, HistoryEntry } from '../types';
+import type { Finding } from '../types';
 import { EventsModal } from './EventsModal';
 import { FindingIdentity } from './FindingIdentity';
-import { HistoryTimeline } from './HistoryTimeline';
+import { HistoryDetails } from './HistoryTimeline';
 import { NoteBox } from './NoteBox';
 
 const RISK_STYLE: Record<string, { bg: string; color: string }> = {
@@ -44,30 +44,17 @@ export function AttentionCard({
   onClearError: () => void;
 }) {
   const analysis = finding.latest_analysis;
-  const hasRecommendation = analysis?.verdict === 'attention';
+  // An AI verdict stamps last_triaged_at and answered_at with the same time, so
+  // a later last_triaged_at means a human decided after it (e.g. Handled, then
+  // This was wrong): the old recommendation is stale, so show the fallback.
+  const humanDecidedAfter =
+    analysis?.answered_at != null &&
+    finding.last_triaged_at != null &&
+    finding.last_triaged_at > analysis.answered_at;
+  const hasRecommendation = analysis?.verdict === 'attention' && !humanDecidedAfter;
   const [closing, setClosing] = useState<CloseKind | null>(null);
   const [busy, setBusy] = useState(false);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [loaded, setLoaded] = useState<{ stamp: string; entries: HistoryEntry[] } | null>(null);
-  const [historyError, setHistoryError] = useState(false);
   const [viewingEvents, setViewingEvents] = useState(false);
-
-  // History loads on first expand — or on mount for fallback cards, which
-  // need the latest human_reopened note for their headline.
-  const needHistory = historyOpen || !hasRecommendation;
-  // The cached timeline is only valid for the finding state it was loaded
-  // for; a refresh that changes the finding refetches it.
-  const historyStamp = `${finding.last_triaged_at}|${finding.last_activity_at}|${finding.reopen_count}`;
-  const history = loaded?.stamp === historyStamp ? loaded.entries : null;
-  useEffect(() => {
-    if (!needHistory || history !== null) return;
-    fetchJson<HistoryEntry[]>(`/api/findings/${finding.id}/history`)
-      .then((entries) => {
-        setLoaded({ stamp: historyStamp, entries });
-        setHistoryError(false);
-      })
-      .catch(() => setHistoryError(true));
-  }, [needHistory, history, historyStamp, finding.id]);
 
   const openNote = (kind: CloseKind) => {
     onClearError();
@@ -96,7 +83,7 @@ export function AttentionCard({
     run(() => postJson(`/api/findings/${finding.id}/close`, note ? { kind, note } : { kind }));
   const reanalyze = () => run(() => postJson(`/api/findings/${finding.id}/reanalyze`));
 
-  const reopenNote = history?.filter((h) => h.kind === 'human_reopened').at(-1)?.note ?? null;
+  const reopenNote = finding.latest_reopen_note;
   const cited = hasRecommendation ? parseCitedEntries(analysis.cited_entries) : [];
   const risk = analysis?.risk_level ?? null;
 
@@ -177,16 +164,7 @@ export function AttentionCard({
 
       {error && <p className="action-error">{error}</p>}
 
-      <details className="history" onToggle={(e) => setHistoryOpen(e.currentTarget.open)}>
-        <summary>History</summary>
-        {historyError ? (
-          <p className="muted-line">Couldn't load history.</p>
-        ) : history === null ? (
-          <p className="muted-line">Loading…</p>
-        ) : (
-          <HistoryTimeline entries={history} />
-        )}
-      </details>
+      <HistoryDetails finding={finding} />
 
       {viewingEvents && <EventsModal findingId={finding.id} onClose={() => setViewingEvents(false)} />}
     </div>
