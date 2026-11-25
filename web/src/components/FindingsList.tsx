@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fetchJson } from '../api';
+import { relativeTime } from '../format';
 import { EventsModal } from './EventsModal';
 import { ClientIcon, GlobeIcon, SeverityIcon, SignatureIcon, STANDING_TRIGGER_TYPES, TRIGGER_ICONS, TRIGGER_LABELS } from '../icons';
 import { severityBand } from '../severity';
@@ -41,17 +42,6 @@ function entityIcon(entityType: string) {
   if (entityType === 'signature') return <SignatureIcon />;
   if (entityType === 'client') return <ClientIcon />;
   return <GlobeIcon />;
-}
-
-function relativeTime(iso: string | undefined): string | null {
-  if (!iso) return null;
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return null;
-  const mins = Math.floor(ms / 60000);
-  if (mins < 60) return `${Math.max(mins, 0)}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
 }
 
 const PAGE_SIZE = 20;

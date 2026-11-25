@@ -745,3 +745,46 @@ footer {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.queue-strip {
+  background: var(--surface-2, var(--surface-3));
+  border: 1px solid var(--border, transparent);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.queue-strip-toggle {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.queue-strip-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.queue-strip-list li {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.queue-strip-meta {
+  color: var(--text-secondary);
+}
+
+.queue-strip-tag {
+  background: var(--accent-soft);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 1px 6px;
+}
