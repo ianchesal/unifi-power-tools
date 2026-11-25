@@ -8,43 +8,25 @@ import {
   markSeenSignature,
   markSeenSourceIp,
   seenClientMacs,
-  setFindingStatus,
+  updateFindingState,
   upsertFinding,
 } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
-import {
-  allClientMacs,
-  auditCandidateEvents,
-  clientDayCounts,
-  clientMacsSince,
-  signatureEventCounts,
-  sourceIpEventCounts,
-} from '../db/sinkQueries.js';
+import { allClientMacs, clientDayCounts, clientMacsSince } from '../db/sinkQueries.js';
 import type { HomelabRegistry } from '../enrichment/homelabServices.js';
 import { computeBaseline, isAnomalous } from './baseline.js';
 import { isInternalSource } from './cidr.js';
 import { applyTrigger, type Finding, reevaluateTrigger } from './findings.js';
+import { matchRules, type RuleName } from './matchRules.js';
 import {
   detectNewClients,
   detectNewSignatures,
   detectNewSourceIps,
   isIgnoredSignature,
   signatureKey,
-  splitSignatureKey,
 } from './newEntity.js';
 import { isSustained, REPEAT_OFFENDER_WINDOW_DAYS } from './repeatOffender.js';
-import {
-  LOW_SIGNAL_SYSTEM_CATEGORIES,
-  NON_SECURITY_OPERATIONAL_CATEGORIES,
-  tryAdminAuditLoginRule,
-  tryExposedHostScanRule,
-  tryHomelabServiceRule,
-  tryIgnoredSignatureRule,
-  tryLowSignalCategoryRule,
-  tryOperationalNoiseRule,
-  tryReputationBlocklistRule,
-} from './ruleTriage.js';
 
 export interface RunnerDeps {
   sinkDb: SinkDb;
@@ -87,226 +69,36 @@ function runCheck(name: string, fn: () => number): number {
   }
 }
 
-export type RuleName =
-  | 'admin_login'
-  | 'operational_noise'
-  | 'low_signal_category'
-  | 'reputation_blocklist'
-  | 'homelab_service_egress'
-  | 'exposed_host_scan'
-  | 'ignored_signature';
+export type { RuleName } from './matchRules.js';
 
-export interface TriageOutcome {
-  matched: boolean;
-  rule?: RuleName;
-}
-
-// Attempts rule-based auto-triage for a new_signature or new_source_ip
-// finding, checking every backing event within [sinceIso, untilIso) (an open
-// upper bound — all events from sinceIso onward — when untilIso is omitted,
-// which is how the live hourly path calls this: the finding was *just*
-// created/updated, so "now" is the natural upper bound). Fires at most one
-// rule (admin login, then operational noise, then reputation blocklist, then
-// exposed-host scan noise for source_ip findings — first match wins) and, on
-// a match, writes an already-answered
-// analysis_requests row and dismisses the finding directly. No-op (returns
-// { matched: false }, finding untouched) if no rule fully explains every
-// event behind it.
+// Rule match + the (temporary, until Task 5/6 rewire) legacy writes: records an
+// already-answered rule analysis and closes the finding.
 function tryRuleTriage(
   deps: RunnerDeps,
   finding: Finding,
   sinceIso: string,
   nowIso: string,
   untilIso?: string,
-  // Restricts which rules may fire, in the same first-match-wins order — used
-  // by the internal-source loop below to allow only operational_noise. That
-  // loop must never let admin_login or reputation_blocklist silently dismiss
-  // an internal-sourced finding: an internal host tripping a security rule
-  // (e.g. blocked traffic to a reputation-blocklisted destination) is exactly
-  // the "possible compromised host talking out" case internal-source flagging
-  // exists to catch, and must keep surfacing for manual review. Undefined
-  // (the default, used by the new-signature/new-source-ip loops and the
-  // backfill) tries every rule, unrestricted.
   allowedRules?: RuleName[]
-): TriageOutcome {
-  // Client findings are backed only by client-only Security events (see
-  // CLIENT_SECURITY_CATEGORIES) and get no rule triage — they always stay for
-  // manual review. Guard explicitly so a client finding never falls into the
-  // signature branch below and has its MAC parsed as a signature key.
-  if (finding.entity_type === 'client') return { matched: false };
-  const allowed = (r: RuleName) => !allowedRules || allowedRules.includes(r);
-  const prefixClause = deps.safeSignaturePrefixes.map(() => 'signature LIKE ?').join(' OR ');
-  const prefixParams = deps.safeSignaturePrefixes.map((p) => `${p}%`);
-
-  let verdict: ReturnType<typeof tryAdminAuditLoginRule> = null;
-  let rule: RuleName | undefined;
-
-  if (finding.entity_type === 'source_ip') {
-    if (allowed('admin_login') && deps.trustedAdminNames.length > 0) {
-      const auditEvents = auditCandidateEvents(deps.sinkDb, finding.entity_key, sinceIso, untilIso);
-      verdict = tryAdminAuditLoginRule(auditEvents, deps.trustedAdminNames);
-      if (verdict) rule = 'admin_login';
-    }
-
-    if (!verdict && allowed('operational_noise')) {
-      const opCounts = sourceIpEventCounts(
-        deps.sinkDb,
-        finding.entity_key,
-        sinceIso,
-        `category IN (${NON_SECURITY_OPERATIONAL_CATEGORIES.map(() => '?').join(',')})`,
-        NON_SECURITY_OPERATIONAL_CATEGORIES,
-        untilIso
-      );
-      verdict = tryOperationalNoiseRule(opCounts);
-      if (verdict) rule = 'operational_noise';
-    }
-
-    if (!verdict && allowed('reputation_blocklist') && prefixClause) {
-      const blockCounts = sourceIpEventCounts(
-        deps.sinkDb,
-        finding.entity_key,
-        sinceIso,
-        `category = 'ips_alert' AND action = 'blocked' AND (${prefixClause})`,
-        prefixParams,
-        untilIso
-      );
-      verdict = tryReputationBlocklistRule(blockCounts);
-      if (verdict) rule = 'reputation_blocklist';
-    }
-
-    // Blocked inbound IDS/IPS hits against a host explicitly confirmed
-    // WAN-exposed (see ruleTriage.ts's tryExposedHostScanRule doc) —
-    // deliberately not signature-restricted like reputation_blocklist:
-    // an attacker's target port is arbitrary/unpredictable, so the
-    // completeness bar is carried entirely by "every event from this
-    // source IP is a blocked ips_alert hit against this specific
-    // wanExposed host," tried one host at a time (first full match wins,
-    // same pattern as the homelab_service_egress loop below).
-    if (!verdict && allowed('exposed_host_scan')) {
-      for (const [hostIp, host] of Object.entries(deps.homelabServices ?? {})) {
-        if (verdict || !host.wanExposed) continue;
-        const exposedCounts = sourceIpEventCounts(
-          deps.sinkDb,
-          finding.entity_key,
-          sinceIso,
-          `category = 'ips_alert' AND action = 'blocked' AND dest_ip = ?`,
-          [hostIp],
-          untilIso
-        );
-        const exposedVerdict = tryExposedHostScanRule(exposedCounts, { hostLabel: host.label });
-        if (exposedVerdict) {
-          verdict = exposedVerdict;
-          rule = 'exposed_host_scan';
-        }
-      }
-    }
-  } else if (finding.entity_type === 'signature') {
-    const { category, signature } = splitSignatureKey(finding.entity_key);
-
-    if (allowed('ignored_signature') && isIgnoredSignature(category, signature)) {
-      verdict = tryIgnoredSignatureRule();
-      rule = 'ignored_signature';
-    }
-
-    if (!verdict && NON_SECURITY_OPERATIONAL_CATEGORIES.includes(category)) {
-      // A new_signature finding's events are already scoped to this exact
-      // (category, signature) pair by the query below, so once `category`
-      // itself is operational, every backing event trivially matches —
-      // the `1=1` predicate just gets the total/matching counts symmetric
-      // with the other rules' completeness check (and guards the total=0
-      // case via isComplete).
-      const opCounts = signatureEventCounts(
-        deps.sinkDb,
-        category,
-        signature,
-        sinceIso,
-        '1=1',
-        [],
-        untilIso
-      );
-      verdict = tryOperationalNoiseRule(opCounts);
-      if (verdict) rule = 'operational_noise';
-    }
-
-    if (!verdict && LOW_SIGNAL_SYSTEM_CATEGORIES.includes(category)) {
-      // Same trivial-completeness shape as the operational-noise check above
-      // (category already pins every backing event), just against a
-      // different, non-operational category set. See ruleTriage.ts for why
-      // 'audit' is deliberately excluded from this list.
-      const lowSignalCounts = signatureEventCounts(
-        deps.sinkDb,
-        category,
-        signature,
-        sinceIso,
-        '1=1',
-        [],
-        untilIso
-      );
-      verdict = tryLowSignalCategoryRule(lowSignalCounts);
-      if (verdict) rule = 'low_signal_category';
-    }
-
-    if (!verdict && category === 'ips_alert' && prefixClause) {
-      const blockCounts = signatureEventCounts(
-        deps.sinkDb,
-        category,
-        signature,
-        sinceIso,
-        `action = 'blocked' AND (${prefixClause})`,
-        prefixParams,
-        untilIso
-      );
-      verdict = tryReputationBlocklistRule(blockCounts);
-      if (verdict) rule = 'reputation_blocklist';
-    }
-
-    // Outbound hits where every backing event's (source_ip, dest_port) pair
-    // matches a documented homelab service's own listen port — e.g. a
-    // self-hosted P2P client (slskd/Soulseek) whose normal peer traffic on
-    // its configured port trips a generic byte-pattern IDS signature. Tried
-    // one (host, service) pair at a time since the completeness bar is
-    // per-pair; first full match wins, same as the other signature rules.
-    if (!verdict && category === 'ips_alert') {
-      const hostServicePairs = Object.entries(deps.homelabServices ?? {}).flatMap(
-        ([hostIp, host]) => host.services.map((service) => ({ hostIp, host, service }))
-      );
-      for (const { hostIp, host, service } of hostServicePairs) {
-        if (verdict) break;
-        const counts = signatureEventCounts(
-          deps.sinkDb,
-          category,
-          signature,
-          sinceIso,
-          `action = 'blocked' AND source_ip = ? AND dest_port = ?`,
-          [hostIp, service.port],
-          untilIso
-        );
-        const homelabVerdict = tryHomelabServiceRule(counts, {
-          hostLabel: host.label,
-          serviceName: service.name,
-          serviceDescription: service.description,
-          port: service.port,
-        });
-        if (homelabVerdict) {
-          verdict = homelabVerdict;
-          rule = 'homelab_service_egress';
-        }
-      }
-    }
-  }
-
-  if (!verdict) return { matched: false };
-
+): { matched: boolean; rule?: RuleName } {
+  const match = matchRules(deps, finding, sinceIso, untilIso, allowedRules);
+  if (!match) return { matched: false };
   createAnsweredRuleAnalysis(
     deps.lensDb,
     finding.id as number,
     { finding },
-    verdict.recommendation,
-    verdict.riskLevel,
+    match.verdict.recommendation,
+    match.verdict.riskLevel,
     nowIso
   );
-  setFindingStatus(deps.lensDb, finding.id as number, 'dismissed');
-  return { matched: true, rule };
+  updateFindingState(deps.lensDb, finding.id as number, {
+    status: 'closed',
+    closed_by: 'rule',
+    closed_reason: match.verdict.recommendation,
+    closed_at: nowIso,
+    last_triaged_at: nowIso,
+  });
+  return { matched: true, rule: match.rule };
 }
 
 export function runHourlyChecks(
@@ -387,7 +179,7 @@ export function runHourlyChecks(
       // would, restricted to that one rule (see tryRuleTriage's allowedRules
       // doc) — otherwise a purely-operational internal finding sits stuck at
       // `new` until someone runs the admin backfill by hand.
-      if (finding.status !== 'dismissed') {
+      if (finding.status !== 'closed') {
         tryRuleTriage(deps, finding, sinceIso, nowIso, undefined, ['operational_noise']);
       }
     }
@@ -466,7 +258,7 @@ export function runHourlyChecks(
       }
     }
     // Any previously-sustained IP that dropped out of the window entirely (no rows at all)
-    for (const finding of listFindings(deps.lensDb)) {
+    for (const finding of listFindings(deps.lensDb, { view: 'all' })) {
       if (finding.entity_type !== 'source_ip') continue;
       if (activeSustainedIps.has(finding.entity_key)) continue;
       if (!finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)) continue;
@@ -502,7 +294,7 @@ export function runHourlyChecks(
         count++;
       }
     }
-    for (const finding of listFindings(deps.lensDb)) {
+    for (const finding of listFindings(deps.lensDb, { view: 'all' })) {
       if (finding.entity_type !== 'client') continue;
       if (activeSustainedMacs.has(finding.entity_key)) continue;
       if (!finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)) continue;
@@ -593,7 +385,7 @@ export function runDailyAnomalyCheck(
       count++;
     }
 
-    for (const finding of listFindings(deps.lensDb)) {
+    for (const finding of listFindings(deps.lensDb, { view: 'all' })) {
       if (finding.entity_type !== 'signature') continue;
       if (activeAnomalies.has(finding.entity_key)) continue;
       if (!finding.triggers.some((t) => t.type === 'anomaly' && t.active)) continue;
@@ -645,8 +437,8 @@ export function runRuleTriageBackfill(deps: RunnerDeps): BackfillResult {
 
   // Client findings get no rule triage (see tryRuleTriage's guard), so they
   // aren't candidates at all — keeps `checked` honest.
-  const candidates = listFindings(deps.lensDb).filter(
-    (f) => f.entity_type !== 'client' && (f.status === 'new' || f.status === 'acknowledged')
+  const candidates = listFindings(deps.lensDb, { view: 'all' }).filter(
+    (f) => f.entity_type !== 'client' && f.status !== 'closed'
   );
 
   for (const finding of candidates) {
