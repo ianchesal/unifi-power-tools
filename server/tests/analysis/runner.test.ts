@@ -25,6 +25,7 @@ import {
   runHourlyChecks,
   runRuleTriageBackfill,
 } from '../../src/analysis/runner.js';
+import { reanalyze } from '../../src/analysis/pipeline.js';
 import { runnerDeps, seededSinkDb } from '../helpers.js';
 
 // Pre-sink-v1.0.3 schema: no client columns.
@@ -750,6 +751,46 @@ describe('runRuleTriageBackfill', () => {
     upsertFinding(lensDb, applyTrigger(null, 'anomaly', '2026-08-20T18:00:00.000Z', 'signature', 'ips_alert|ET DROP Spike'));
 
     expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
+  });
+
+  // Creation window fully rule-explained: a never-decided finding here would close.
+  const explainedCreation = (ip: string) => ({
+    received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: ip, action: 'blocked',
+  });
+
+  it('skips a finding the daily recheck requeued, even when its creation window is fully rule-explained', () => {
+    const ip = '203.0.113.30';
+    const sinkDb = seededSinkDb([
+      explainedCreation(ip),
+      // New, unexplained activity after the AI's decision: the reason for the requeue.
+      { received_at: '2026-08-23T10:00:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: ip },
+    ]);
+    const lensDb = openLensDb(':memory:');
+    const f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', ip));
+    closeAs(lensDb, f, 'ai', '2026-08-20T13:00:00.000Z');
+    markSeenSourceIp(lensDb, ip, firstSeen);
+    markSeenSignature(lensDb, 'ips_alert', 'ET SCAN Nmap', firstSeen);
+    const deps = runnerDeps(sinkDb, lensDb);
+    runHourlyChecks(deps, new Date('2026-08-23T11:00:00Z'));
+    expect(runDailyRecheck(deps, new Date('2026-08-23T12:00:00Z')).requeued).toBe(1);
+
+    expect(runRuleTriageBackfill(deps)).toMatchObject({ checked: 0, closed: 0 });
+    expect(getPendingRequestForFinding(lensDb, f.id as number)?.is_recheck).toBe(1);
+    expect(byKey(lensDb, ip)?.status).toBe('triaging');
+  });
+
+  it('skips a finding an operator sent back for re-analysis', () => {
+    const ip = '203.0.113.31';
+    const sinkDb = seededSinkDb([explainedCreation(ip)]);
+    const lensDb = openLensDb(':memory:');
+    const f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', ip));
+    closeAs(lensDb, f, 'human', '2026-08-20T13:00:00.000Z');
+    reanalyze(lensDb, f.id as number, '2026-08-21T09:00:00.000Z');
+    expect(byKey(lensDb, ip)?.status).toBe('triaging');
+
+    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb))).toMatchObject({ checked: 0, closed: 0 });
+    expect(byKey(lensDb, ip)?.status).toBe('triaging');
+    expect(getPendingRequestForFinding(lensDb, f.id as number)).not.toBeNull();
   });
 
   it('anchors the completeness window to [first_seen - 24h, first_seen), not to now', () => {

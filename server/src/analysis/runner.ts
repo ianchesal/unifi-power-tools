@@ -569,6 +569,8 @@ export interface BackfillResult {
 // - repeat_offender: `[first_seen - 14d, first_seen)`, the repeat-offender scan.
 // - anomaly: the anomaly day `[D, D+1)`, with D = date(first_seen - 24h) — the
 //   daily job judges the day before it runs, so this holds even if it ran late.
+//   It assumes the scheduled run: a manual runDailyAnomalyCheck for an older
+//   explicit `day` still stamps first_seen = now, so D would be the wrong day.
 // - anything else: `[first_seen - 24h, first_seen)`, the hourly scan.
 export function backfillWindow(finding: Finding): { sinceIso: string; untilIso: string } {
   const firstSeenMs = Date.parse(finding.first_seen);
@@ -594,7 +596,7 @@ export function backfillWindow(finding: Finding): { sinceIso: string; untilIso: 
   }
 }
 
-// Catch-up rule pass over findings still waiting on AI (triaging), e.g. ones
+// Catch-up rule pass over never-decided findings still waiting on AI, e.g. ones
 // created before a rule existed or before TRUSTED_ADMIN_NAMES was configured.
 // The live path only evaluates a finding at the moment it's created, so this
 // re-runs the rules over the same window that creation used (backfillWindow):
@@ -618,9 +620,14 @@ export function runRuleTriageBackfill(deps: RunnerDeps, now: Date = new Date()):
   };
 
   // Client findings get no rule triage (see matchRules' guard), so they
-  // aren't candidates at all — keeps `checked` honest.
+  // aren't candidates at all — keeps `checked` honest. Only never-decided
+  // findings (last_triaged_at null) are candidates: a triaging finding that
+  // was decided before — requeued by the daily recheck, reopened by an
+  // internal_source trigger, or sent back by an operator's re-analyze — is
+  // there because of what happened after that decision, so its creation
+  // window is stale and a rule match on it must not close the finding.
   const candidates = listFindings(deps.lensDb, { view: 'triaging' }).filter(
-    (f) => f.entity_type !== 'client'
+    (f) => f.entity_type !== 'client' && f.last_triaged_at === null
   );
 
   for (const finding of candidates) {
