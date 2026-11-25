@@ -93,14 +93,16 @@ export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): vo
           }
         }
         // applyAiVerdict reports a missing/answered/cancelled request itself.
-        const result = applyAiVerdict(
+        const { request: answered, finding: decided } = applyAiVerdict(
           lensDb,
           id,
           input,
           { unblockedIpsAlertsSinceDecision: unblocked, activeEntryIds: PHASE_A_ACTIVE_ENTRY_IDS },
           new Date().toISOString()
         );
-        return toolResult(result);
+        // The stored context bundle is large; the session already has it.
+        const { context: _context, ...requestWithoutContext } = answered;
+        return toolResult({ request: requestWithoutContext, finding: decided });
       } catch (e) {
         return toolError(e);
       }

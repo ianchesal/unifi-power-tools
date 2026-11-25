@@ -71,7 +71,10 @@ describe('MCP analysis tools', () => {
 
     const submitted = await call(client, 'submit_analysis', { id: request.id, ...close });
     expect(submitted.isError).toBe(false);
-    expect(JSON.parse(submitted.text).finding).toMatchObject({ status: 'closed', closed_by: 'ai' });
+    const submittedBody = JSON.parse(submitted.text);
+    expect(submittedBody.finding).toMatchObject({ status: 'closed', closed_by: 'ai' });
+    expect(submittedBody.request).toMatchObject({ id: request.id, status: 'answered', verdict: 'close' });
+    expect(submittedBody.request).not.toHaveProperty('context');
     expect(getFindingById(lensDb, finding.id as number)).toMatchObject({
       status: 'closed',
       closed_by: 'ai',
