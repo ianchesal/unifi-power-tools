@@ -3,7 +3,9 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { applyTrigger } from '../../src/analysis/findings.js';
-import { upsertFinding } from '../../src/db/findingsStore.js';
+import { createAnalysisRequestsRouter } from '../../src/api/analysisRequests.js';
+import { createAnalysisRequest, recordAiVerdict } from '../../src/db/analysisRequestsStore.js';
+import { updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { openLensDb } from '../../src/db/lensDb.js';
 import type { SinkDb } from '../../src/db/sinkDb.js';
 import { createFindingsRouter } from '../../src/api/findings.js';
@@ -26,79 +28,207 @@ function seededSinkDb(
   return { conn };
 }
 
+type Db = ReturnType<typeof openLensDb>;
+
+function makeFinding(db: Db, ip: string, state: Parameters<typeof updateFindingState>[2] = {}) {
+  const f = upsertFinding(db, applyTrigger(null, 'internal_source', 't0', 'source_ip', ip));
+  return state && Object.keys(state).length
+    ? (updateFindingState(db, f.id as number, state) as typeof f)
+    : f;
+}
+
+const closed = (by: 'rule' | 'ai' | 'human' | 'system', reason: string, at = new Date().toISOString()) => ({
+  status: 'closed' as const,
+  closed_by: by,
+  closed_reason: reason,
+  closed_at: at,
+});
+
+function appFor(db: Db, sinkDb: SinkDb | null = null) {
+  const app = express();
+  app.use(express.json());
+  app.use('/api', createFindingsRouter(db, sinkDb));
+  app.use('/api', createAnalysisRequestsRouter(db));
+  return app;
+}
+
 describe('findings API', () => {
-  it('GET /api/findings lists findings, POST /:id/status updates status', async () => {
-    const lensDb = openLensDb(':memory:');
-    const finding = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
+  it('GET /api/findings defaults to open work and embeds latest_analysis', async () => {
+    const db = openLensDb(':memory:');
+    const att = makeFinding(db, '192.0.2.1', { status: 'attention' });
+    makeFinding(db, '192.0.2.2'); // triaging
+    makeFinding(db, '192.0.2.3', closed('rule', 'noise'));
+    const req = createAnalysisRequest(db, att.id as number, 't1');
+    recordAiVerdict(
+      db,
+      req.id,
+      { verdict: 'attention', risk_level: 'high', summary: 'do X', reasoning: 'because' },
+      't2'
+    );
 
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, null));
-
-    const listRes = await request(app).get('/api/findings');
-    expect(listRes.status).toBe(200);
-    expect(listRes.body).toHaveLength(1);
-
-    const updateRes = await request(app)
-      .post(`/api/findings/${finding.id}/status`)
-      .send({ status: 'acknowledged' });
-    expect(updateRes.status).toBe(200);
-    expect(updateRes.body.status).toBe('acknowledged');
+    const res = await request(appFor(db)).get('/api/findings');
+    expect(res.status).toBe(200);
+    expect(res.body.map((f: { status: string }) => f.status).sort()).toEqual(['attention', 'triaging']);
+    const a = res.body.find((f: { status: string }) => f.status === 'attention');
+    expect(a.latest_analysis.summary).toBe('do X');
+    expect(a.latest_analysis).not.toHaveProperty('context');
+    const t = res.body.find((f: { status: string }) => f.status === 'triaging');
+    expect(t.latest_analysis).toBeNull();
   });
 
-  it('excludes dismissed/resolved findings by default, but includes them when explicitly requested', async () => {
-    const lensDb = openLensDb(':memory:');
-    const active = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.1.1.1'));
-    const dismissed = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '2.2.2.2'));
+  it('?view=closed&closed_by=rule&q= filters; invalid view/closed_by → 400', async () => {
+    const db = openLensDb(':memory:');
+    makeFinding(db, '192.0.2.1', closed('rule', 'WAN noise'));
+    makeFinding(db, '192.0.2.2', closed('rule', 'blocklist hit'));
+    makeFinding(db, '192.0.2.3', closed('human', 'WAN noise'));
+    makeFinding(db, '192.0.2.4');
+    const app = appFor(db);
 
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, null));
+    const all = await request(app).get('/api/findings?view=closed');
+    expect(all.body).toHaveLength(3);
+    const byRule = await request(app).get('/api/findings?view=closed&closed_by=rule');
+    expect(byRule.body).toHaveLength(2);
+    const q = await request(app).get('/api/findings?view=closed&closed_by=rule&q=wan');
+    expect(q.body.map((f: { entity_key: string }) => f.entity_key)).toEqual(['192.0.2.1']);
 
-    await request(app).post(`/api/findings/${dismissed.id}/status`).send({ status: 'dismissed' });
-
-    const defaultRes = await request(app).get('/api/findings');
-    expect(defaultRes.status).toBe(200);
-    const defaultIds = defaultRes.body.map((f: { id: number }) => f.id);
-    expect(defaultIds).toContain(active.id);
-    expect(defaultIds).not.toContain(dismissed.id);
-
-    const explicitRes = await request(app).get('/api/findings?status=dismissed');
-    expect(explicitRes.status).toBe(200);
-    const explicitIds = explicitRes.body.map((f: { id: number }) => f.id);
-    expect(explicitIds).toEqual([dismissed.id]);
+    expect((await request(app).get('/api/findings?view=bogus')).status).toBe(400);
+    expect((await request(app).get('/api/findings?closed_by=bogus')).status).toBe(400);
   });
 
   it('paginates when limit/offset are passed, returning items + total', async () => {
-    const lensDb = openLensDb(':memory:');
-    for (let i = 0; i < 5; i++) {
-      upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', `10.0.0.${i}`));
-    }
-
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, null));
+    const db = openLensDb(':memory:');
+    for (let i = 0; i < 5; i++) makeFinding(db, `10.0.0.${i}`);
+    const app = appFor(db);
 
     const page1 = await request(app).get('/api/findings?limit=2&offset=0');
-    expect(page1.status).toBe(200);
     expect(page1.body.total).toBe(5);
     expect(page1.body.items).toHaveLength(2);
-
     const page3 = await request(app).get('/api/findings?limit=2&offset=4');
-    expect(page3.status).toBe(200);
-    expect(page3.body.total).toBe(5);
     expect(page3.body.items).toHaveLength(1);
   });
 
-  it('rejects an invalid status', async () => {
-    const lensDb = openLensDb(':memory:');
-    const finding = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, null));
+  it('POST close on an attention finding closes it with the note', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1', { status: 'attention' });
+    const res = await request(appFor(db))
+      .post(`/api/findings/${f.id}/close`)
+      .send({ kind: 'handled', note: 'blocked at the firewall' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: 'closed',
+      closed_by: 'human',
+      closed_reason: 'blocked at the firewall',
+    });
+  });
 
-    const res = await request(app).post(`/api/findings/${finding.id}/status`).send({ status: 'bogus' });
-    expect(res.status).toBe(400);
+  it('POST close on a triaging finding → 409 naming the status; bad body → 400', async () => {
+    const db = openLensDb(':memory:');
+    const triaging = makeFinding(db, '192.0.2.1');
+    const app = appFor(db);
+    const res = await request(app).post(`/api/findings/${triaging.id}/close`).send({ kind: 'handled' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ status: 'triaging' });
+    expect(res.body.error).toMatch(/triaging/);
+
+    const bad = await request(app).post(`/api/findings/${triaging.id}/close`).send({ kind: 'bogus' });
+    expect(bad.status).toBe(400);
+  });
+
+  it('POST reopen requires a non-blank note (400) and moves closed → attention', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1', closed('rule', 'noise'));
+    const app = appFor(db);
+
+    expect((await request(app).post(`/api/findings/${f.id}/reopen`).send({})).status).toBe(400);
+    expect((await request(app).post(`/api/findings/${f.id}/reopen`).send({ note: '   ' })).status).toBe(400);
+
+    const ok = await request(app).post(`/api/findings/${f.id}/reopen`).send({ note: 'still seeing it' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe('attention');
+  });
+
+  it('POST reanalyze moves closed → triaging and queues one pending request', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1', closed('human', 'ok'));
+    const app = appFor(db);
+    const res = await request(app).post(`/api/findings/${f.id}/reanalyze`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('triaging');
+    const pending = await request(app).get(`/api/analysis-requests?findingId=${f.id}`);
+    expect(pending.body.filter((r: { status: string }) => r.status === 'pending')).toHaveLength(1);
+  });
+
+  it('POST to an unknown id → 404', async () => {
+    const app = appFor(openLensDb(':memory:'));
+    expect((await request(app).post('/api/findings/999/close').send({ kind: 'handled' })).status).toBe(404);
+    expect((await request(app).post('/api/findings/999/reopen').send({ note: 'x' })).status).toBe(404);
+    expect((await request(app).post('/api/findings/999/reanalyze')).status).toBe(404);
+    expect((await request(app).get('/api/findings/999/history')).status).toBe(404);
+  });
+
+  it('GET history returns the timeline in order', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1', { status: 'attention' });
+    const app = appFor(db);
+    await request(app).post(`/api/findings/${f.id}/close`).send({ kind: 'not_concern' });
+    await request(app).post(`/api/findings/${f.id}/reopen`).send({ note: 'again' });
+    const res = await request(app).get(`/api/findings/${f.id}/history`);
+    expect(res.status).toBe(200);
+    expect(res.body.map((h: { kind: string }) => h.kind)).toEqual([
+      'human_closed_not_concern',
+      'human_reopened',
+    ]);
+  });
+
+  it('GET /api/findings-summary counts attention, triaging and closed in last 7 days by closed_by', async () => {
+    const db = openLensDb(':memory:');
+    makeFinding(db, '192.0.2.1', { status: 'attention' });
+    makeFinding(db, '192.0.2.2', { status: 'attention' });
+    makeFinding(db, '192.0.2.3');
+    makeFinding(db, '192.0.2.4', closed('rule', 'r'));
+    makeFinding(db, '192.0.2.5', closed('ai', 'a'));
+    makeFinding(db, '192.0.2.6', closed('rule', 'old', '2020-01-01T00:00:00.000Z'));
+    const res = await request(appFor(db)).get('/api/findings-summary');
+    expect(res.body).toEqual({
+      attention: 2,
+      triaging: 1,
+      closed_last_7d: { rule: 1, ai: 1, human: 0, system: 0 },
+    });
+  });
+
+  it('GET /api/queue reports count, oldest pending and last AI answer', async () => {
+    const db = openLensDb(':memory:');
+    const a = makeFinding(db, '192.0.2.1');
+    const b = makeFinding(db, '192.0.2.2');
+    const answered = createAnalysisRequest(db, a.id as number, '2026-11-25T00:00:00.000Z');
+    recordAiVerdict(
+      db,
+      answered.id,
+      { verdict: 'close', risk_level: 'low', summary: 's', reasoning: 'r' },
+      '2026-11-25T01:00:00.000Z'
+    );
+    createAnalysisRequest(db, b.id as number, '2026-11-25T02:00:00.000Z');
+    const res = await request(appFor(db)).get('/api/queue');
+    expect(res.body).toEqual({
+      count: 1,
+      oldest_created_at: '2026-11-25T02:00:00.000Z',
+      last_answered_at: '2026-11-25T01:00:00.000Z',
+    });
+  });
+
+  it('POST /api/findings/:id/status and /analyze are gone (404)', async () => {
+    const db = openLensDb(':memory:');
+    const f = makeFinding(db, '192.0.2.1');
+    const app = appFor(db);
+    expect((await request(app).post(`/api/findings/${f.id}/status`).send({ status: 'dismissed' })).status).toBe(404);
+    expect((await request(app).post(`/api/findings/${f.id}/analyze`)).status).toBe(404);
+  });
+
+  it('list, summary and queue work with sinkDb = null', async () => {
+    const app = appFor(openLensDb(':memory:'), null);
+    expect((await request(app).get('/api/findings')).status).toBe(200);
+    expect((await request(app).get('/api/findings-summary')).status).toBe(200);
+    expect((await request(app).get('/api/queue')).status).toBe(200);
   });
 });
 

@@ -6,12 +6,11 @@ import { createAnalysisRequestsRouter } from '../../src/api/analysisRequests.js'
 import { createAnalysisRequest, recordAiVerdict } from '../../src/db/analysisRequestsStore.js';
 import { upsertFinding } from '../../src/db/findingsStore.js';
 import { openLensDb } from '../../src/db/lensDb.js';
-import { createUnifiMcpClient } from '../../src/enrichment/unifiMcpClient.js';
 
 function appFor(lensDb: ReturnType<typeof openLensDb>) {
   const app = express();
   app.use(express.json());
-  app.use('/api', createAnalysisRequestsRouter(lensDb, createUnifiMcpClient(null), null));
+  app.use('/api', createAnalysisRequestsRouter(lensDb));
   return app;
 }
 
@@ -43,6 +42,9 @@ describe('analysis-requests API', () => {
     const unfiltered = await request(app).get('/api/analysis-requests');
     expect(unfiltered.status).toBe(200);
     expect(unfiltered.body.map((r: { id: number }) => r.id)).toEqual([pending.id]);
+    // The MCP context bundle never goes over REST.
+    expect(forFinding.body[0]).not.toHaveProperty('context');
+    expect(unfiltered.body[0]).not.toHaveProperty('context');
   });
 
   it('POST /findings/:id/analyze no longer exists (requests are queued by the pipeline)', async () => {

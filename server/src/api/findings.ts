@@ -1,8 +1,18 @@
-import { Router } from 'express';
+import { type Request, type Response, Router } from 'express';
 import { z } from 'zod';
-import type { Finding } from '../analysis/findings.js';
+import type { ClosedBy, Finding } from '../analysis/findings.js';
+import { FindingNotFoundError, TransitionError } from '../analysis/findings.js';
 import { splitSignatureKey } from '../analysis/newEntity.js';
-import { countFindings, listFindings, setFindingStatus } from '../db/findingsStore.js';
+import { humanClose, humanReopen, reanalyze } from '../analysis/pipeline.js';
+import { type AnalysisRequestRow, latestAnsweredAnalyses } from '../db/analysisRequestsStore.js';
+import { listHistory } from '../db/findingHistoryStore.js';
+import {
+  closedCountsSince,
+  countFindings,
+  type FindingsFilter,
+  getFindingById,
+  listFindings,
+} from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
 import {
@@ -12,9 +22,18 @@ import {
   latestClientNames,
 } from '../db/sinkQueries.js';
 
-const StatusUpdate = z.object({
-  status: z.enum(['acknowledged', 'dismissed']),
+const VIEWS = ['open', 'attention', 'triaging', 'closed', 'all'] as const;
+const CLOSED_BYS = ['rule', 'ai', 'human', 'system'] as const;
+
+const CloseBody = z.object({
+  kind: z.enum(['handled', 'not_concern']),
+  note: z.string().optional(),
 });
+const ReopenBody = z.object({ note: z.string().trim().min(1, 'note is required') });
+
+export type FindingListItem = FindingWithDisplayName & {
+  latest_analysis: Omit<AnalysisRequestRow, 'context'> | null;
+};
 
 export type FindingWithDisplayName = Finding & { display_name?: string | null };
 
@@ -46,48 +65,109 @@ export function withDisplayNames(
 export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Router {
   const router = Router();
 
-  router.get('/findings', (req, res) => {
-    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    // Default view excludes dismissed/resolved findings — with new_source_ip a
-    // permanent, never-auto-resolving trigger, an unfiltered list only grows.
-    // Callers that explicitly want dismissed/resolved rows can ask via ?status=,
-    // or ?status=all for every finding regardless of status.
-    const filter =
-      status === 'all'
-        ? {}
-        : status
-          ? { status: status as never }
-          : { excludeStatuses: ['dismissed', 'resolved'] as never };
+  // Attaches each finding's latest answered analysis (minus the bulky
+  // `context` bundle, which is for the MCP handoff, not the dashboard).
+  function withAnalyses(findings: FindingWithDisplayName[]): FindingListItem[] {
+    const latest = latestAnsweredAnalyses(
+      lensDb,
+      findings.map((f) => f.id as number)
+    );
+    return findings.map((f) => {
+      const row = latest.get(f.id as number);
+      if (!row) return { ...f, latest_analysis: null };
+      const { context: _context, ...analysis } = row;
+      return { ...f, latest_analysis: analysis };
+    });
+  }
 
-    // limit/offset are opt-in: callers that don't paginate (e.g. the KPI
-    // summary, which needs every open finding to compute counts) keep
-    // getting the full unpaginated array they always have.
+  router.get('/findings', (req, res) => {
+    const view = typeof req.query.view === 'string' ? req.query.view : 'open';
+    if (!(VIEWS as readonly string[]).includes(view)) {
+      res.status(400).json({ error: `view must be one of ${VIEWS.join(', ')}` });
+      return;
+    }
+    const filter: FindingsFilter = { view: view as FindingsFilter['view'] };
+    if (typeof req.query.closed_by === 'string') {
+      if (!(CLOSED_BYS as readonly string[]).includes(req.query.closed_by)) {
+        res.status(400).json({ error: `closed_by must be one of ${CLOSED_BYS.join(', ')}` });
+        return;
+      }
+      filter.closedBy = req.query.closed_by as ClosedBy;
+    }
+    if (typeof req.query.q === 'string' && req.query.q !== '') filter.q = req.query.q;
+
+    const build = (rows: Finding[]) => withAnalyses(withDisplayNames(sinkDb, rows));
+
+    // limit/offset are opt-in: callers that don't paginate keep getting the
+    // full unpaginated array.
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
     if (limitRaw === undefined) {
-      res.json(withDisplayNames(sinkDb, listFindings(lensDb, filter)));
+      res.json(build(listFindings(lensDb, filter)));
       return;
     }
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 20;
     const offsetRaw = typeof req.query.offset === 'string' ? Number(req.query.offset) : 0;
     const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0;
     res.json({
-      items: withDisplayNames(sinkDb, listFindings(lensDb, { ...filter, limit, offset })),
+      items: build(listFindings(lensDb, { ...filter, limit, offset })),
       total: countFindings(lensDb, filter),
     });
   });
 
-  router.post('/findings/:id/status', (req, res) => {
-    const parsed = StatusUpdate.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'status must be "acknowledged" or "dismissed"' });
-      return;
-    }
-    const updated = setFindingStatus(lensDb, Number(req.params.id), parsed.data.status);
-    if (!updated) {
+  router.get('/findings-summary', (_req, res) => {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    res.json({
+      attention: countFindings(lensDb, { view: 'attention' }),
+      triaging: countFindings(lensDb, { view: 'triaging' }),
+      closed_last_7d: closedCountsSince(lensDb, since),
+    });
+  });
+
+  router.get('/findings/:id/history', (req, res) => {
+    const id = Number(req.params.id);
+    if (!getFindingById(lensDb, id)) {
       res.status(404).json({ error: 'finding not found' });
       return;
     }
-    res.json(updated);
+    res.json(listHistory(lensDb, id));
+  });
+
+  // Shared error mapping for the three state-changing POSTs.
+  function act(req: Request, res: Response, run: (id: number, nowIso: string) => Finding): void {
+    try {
+      res.json(run(Number(req.params.id), new Date().toISOString()));
+    } catch (err) {
+      if (err instanceof FindingNotFoundError) {
+        res.status(404).json({ error: 'finding not found' });
+      } else if (err instanceof TransitionError) {
+        res.status(409).json({ error: err.message, status: err.from });
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  router.post('/findings/:id/close', (req, res) => {
+    const parsed = CloseBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'kind must be "handled" or "not_concern"' });
+      return;
+    }
+    const { kind, note } = parsed.data;
+    act(req, res, (id, now) => humanClose(lensDb, id, kind, note ?? null, now));
+  });
+
+  router.post('/findings/:id/reopen', (req, res) => {
+    const parsed = ReopenBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'note is required' });
+      return;
+    }
+    act(req, res, (id, now) => humanReopen(lensDb, id, parsed.data.note, now));
+  });
+
+  router.post('/findings/:id/reanalyze', (req, res) => {
+    act(req, res, (id, now) => reanalyze(lensDb, id, now));
   });
 
   // Named "activity" rather than "events" — ad blockers and privacy
@@ -95,7 +175,7 @@ export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Rou
   // analytics-tracking pattern (see /stats/activity-over-time for the same
   // fix and the root-cause writeup).
   router.get('/findings/:id/activity', (req, res) => {
-    const finding = listFindings(lensDb, {}).find((f) => f.id === Number(req.params.id));
+    const finding = getFindingById(lensDb, Number(req.params.id));
     if (!finding) {
       res.status(404).json({ error: 'finding not found' });
       return;
