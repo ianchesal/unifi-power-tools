@@ -1,4 +1,3 @@
-import { createAnsweredRuleAnalysis } from '../db/analysisRequestsStore.js';
 import {
   getFinding,
   hasSeenSignature,
@@ -8,7 +7,6 @@ import {
   markSeenSignature,
   markSeenSourceIp,
   seenClientMacs,
-  updateFindingState,
   upsertFinding,
 } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
@@ -26,6 +24,7 @@ import {
   isIgnoredSignature,
   signatureKey,
 } from './newEntity.js';
+import { closeByRule } from './pipeline.js';
 import { isSustained, REPEAT_OFFENDER_WINDOW_DAYS } from './repeatOffender.js';
 
 export interface RunnerDeps {
@@ -71,8 +70,8 @@ function runCheck(name: string, fn: () => number): number {
 
 export type { RuleName } from './matchRules.js';
 
-// Rule match + the (temporary, until Task 5/6 rewire) legacy writes: records an
-// already-answered rule analysis and closes the finding.
+// Rule match + close via the pipeline (which records the answered rule analysis,
+// cancels any pending request and writes history).
 function tryRuleTriage(
   deps: RunnerDeps,
   finding: Finding,
@@ -83,21 +82,7 @@ function tryRuleTriage(
 ): { matched: boolean; rule?: RuleName } {
   const match = matchRules(deps, finding, sinceIso, untilIso, allowedRules);
   if (!match) return { matched: false };
-  createAnsweredRuleAnalysis(
-    deps.lensDb,
-    finding.id as number,
-    { finding },
-    match.verdict.recommendation,
-    match.verdict.riskLevel,
-    nowIso
-  );
-  updateFindingState(deps.lensDb, finding.id as number, {
-    status: 'closed',
-    closed_by: 'rule',
-    closed_reason: match.verdict.recommendation,
-    closed_at: nowIso,
-    last_triaged_at: nowIso,
-  });
+  closeByRule(deps.lensDb, finding, match, nowIso);
   return { matched: true, rule: match.rule };
 }
 
