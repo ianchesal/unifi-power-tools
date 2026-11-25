@@ -271,6 +271,21 @@ export function clientDayCounts(db: SinkDb, sinceIso: string): { mac: string; da
     .all(sinceIso, ...where.params) as { mac: string; days: number }[];
 }
 
+// Latest client-only Security event per MAC since sinceIso, for the runner's
+// last-activity bump.
+export function clientLastActivitySince(
+  db: SinkDb,
+  sinceIso: string
+): { mac: string; last_received_at: string }[] {
+  const where = clientOnlyWhere();
+  return db.conn
+    .prepare(
+      `SELECT source_client_mac AS mac, MAX(received_at) AS last_received_at FROM events
+       WHERE received_at >= ? AND ${where.sql} GROUP BY source_client_mac`
+    )
+    .all(sinceIso, ...where.params) as { mac: string; last_received_at: string }[];
+}
+
 // Display-only: the most recent non-null name seen for each MAC on any row
 // (not just client-only ones — a name observed alongside an IP is still the
 // best label for the host). One row per MAC: SQLite's bare-column rule takes

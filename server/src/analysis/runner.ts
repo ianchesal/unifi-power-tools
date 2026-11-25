@@ -1,4 +1,6 @@
+import { addHistory } from '../db/findingHistoryStore.js';
 import {
+  bumpLastActivity,
   getFinding,
   hasSeenSignature,
   hasSeenSourceIp,
@@ -11,11 +13,23 @@ import {
 } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
-import { allClientMacs, clientDayCounts, clientMacsSince } from '../db/sinkQueries.js';
+import {
+  allClientMacs,
+  clientDayCounts,
+  clientLastActivitySince,
+  clientMacsSince,
+} from '../db/sinkQueries.js';
 import type { HomelabRegistry } from '../enrichment/homelabServices.js';
 import { computeBaseline, isAnomalous } from './baseline.js';
 import { isInternalSource } from './cidr.js';
-import { applyTrigger, type Finding, reevaluateTrigger } from './findings.js';
+import {
+  applyTrigger,
+  decisionWindowStart,
+  type Finding,
+  isRecheckDue,
+  reevaluateTrigger,
+  type TriggerType,
+} from './findings.js';
 import { matchRules, type RuleName } from './matchRules.js';
 import {
   detectNewClients,
@@ -24,7 +38,14 @@ import {
   isIgnoredSignature,
   signatureKey,
 } from './newEntity.js';
-import { closeByRule } from './pipeline.js';
+import {
+  atomically,
+  closeByRule,
+  queueForAnalysis,
+  recheckRequeue,
+  recheckStillClosed,
+  recordCreated,
+} from './pipeline.js';
 import { isSustained, REPEAT_OFFENDER_WINDOW_DAYS } from './repeatOffender.js';
 
 export interface RunnerDeps {
@@ -35,14 +56,15 @@ export interface RunnerDeps {
   safeSignaturePrefixes: string[];
   // Optional: per-deployment registry of known homelab hosts/services (see
   // enrichment/homelabServices.ts). Absent/empty is a genuine no-op for
-  // tryRuleTriage's homelab-service-egress check, same tolerance pattern as
-  // the rest of that module's optional local config.
+  // matchRules' homelab-service-egress and exposed-host checks, same tolerance
+  // pattern as the rest of that module's optional local config.
   homelabServices?: HomelabRegistry;
 }
 
 const NEW_ENTITY_WINDOW_HOURS = 24;
 
 interface RecentEventRow {
+  received_at: string;
   category: string;
   signature: string | null;
   source_ip: string | null;
@@ -50,7 +72,9 @@ interface RecentEventRow {
 
 function recentEvents(sinkDb: SinkDb, sinceIso: string): RecentEventRow[] {
   const rows = sinkDb.conn
-    .prepare('SELECT category, signature, source_ip FROM events WHERE received_at >= ?')
+    .prepare(
+      'SELECT received_at, category, signature, source_ip FROM events WHERE received_at >= ?'
+    )
     .all(sinceIso) as unknown as RecentEventRow[];
   return rows.filter((e) => !(e.signature && isIgnoredSignature(e.category, e.signature)));
 }
@@ -70,20 +94,75 @@ function runCheck(name: string, fn: () => number): number {
 
 export type { RuleName } from './matchRules.js';
 
-// Rule match + close via the pipeline (which records the answered rule analysis,
-// cancels any pending request and writes history).
-function tryRuleTriage(
+interface RecordedTrigger {
+  finding: Finding;
+  created: boolean;
+  reopened: boolean;
+}
+
+// Applies a trigger and records what it did to the finding's history: `created`
+// for a brand-new finding, `trigger_added` when an existing one gains a trigger
+// type it didn't have. `reopened` is applyTrigger's one status change (a
+// rule-closed finding gaining internal_source goes back to triaging).
+function recordTrigger(
+  deps: RunnerDeps,
+  existing: Finding | null,
+  type: TriggerType,
+  nowIso: string,
+  entityType: Finding['entity_type'],
+  entityKey: string
+): RecordedTrigger {
+  return atomically(deps.lensDb, () => {
+    const finding = upsertFinding(
+      deps.lensDb,
+      applyTrigger(existing, type, nowIso, entityType, entityKey)
+    );
+    const reopened = existing?.status === 'closed' && finding.status === 'triaging';
+    if (!existing) {
+      recordCreated(deps.lensDb, finding, nowIso);
+    } else if (!existing.triggers.some((t) => t.type === type)) {
+      addHistory(deps.lensDb, {
+        finding_id: finding.id as number,
+        at: nowIso,
+        kind: 'trigger_added',
+        actor: 'system',
+        summary: reopened
+          ? `Trigger added: ${type}; reopened for triage`
+          : `Trigger added: ${type}`,
+      });
+    }
+    return { finding, created: !existing, reopened };
+  });
+}
+
+// Every new (or reopened) finding goes through the rules first; whatever no
+// rule fully explains is queued for AI analysis. Only call this for a finding
+// that was just created or reopened: those never have a pending request, and
+// queueForAnalysis would otherwise record a second `queued` row.
+function routeToPipeline(
   deps: RunnerDeps,
   finding: Finding,
   sinceIso: string,
+  untilIso: string | undefined,
   nowIso: string,
-  untilIso?: string,
   allowedRules?: RuleName[]
-): { matched: boolean; rule?: RuleName } {
+): void {
   const match = matchRules(deps, finding, sinceIso, untilIso, allowedRules);
-  if (!match) return { matched: false };
-  closeByRule(deps.lensDb, finding, match, nowIso);
-  return { matched: true, rule: match.rule };
+  if (match) closeByRule(deps.lensDb, finding, match, nowIso);
+  else queueForAnalysis(deps.lensDb, finding, nowIso);
+}
+
+function routeIfNew(
+  deps: RunnerDeps,
+  r: RecordedTrigger,
+  sinceIso: string,
+  untilIso: string | undefined,
+  nowIso: string,
+  allowedRules?: RuleName[]
+): void {
+  if (r.created || r.reopened) {
+    routeToPipeline(deps, r.finding, sinceIso, untilIso, nowIso, allowedRules);
+  }
 }
 
 export function runHourlyChecks(
@@ -104,19 +183,17 @@ export function runHourlyChecks(
         .map((e) => signatureKey(e.category, e.signature as string))
     );
     for (const { category, signature } of detectNewSignatures(events, seenSigSet)) {
-      const existing = getFinding(deps.lensDb, 'signature', signatureKey(category, signature));
-      const finding = upsertFinding(
-        deps.lensDb,
-        applyTrigger(
-          existing,
-          'new_signature',
-          nowIso,
-          'signature',
-          signatureKey(category, signature)
-        )
+      const key = signatureKey(category, signature);
+      const r = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'signature', key),
+        'new_signature',
+        nowIso,
+        'signature',
+        key
       );
       markSeenSignature(deps.lensDb, category, signature, nowIso);
-      tryRuleTriage(deps, finding, sinceIso, nowIso);
+      routeIfNew(deps, r, sinceIso, undefined, nowIso);
       count++;
     }
     return count;
@@ -130,13 +207,16 @@ export function runHourlyChecks(
         .map((e) => e.source_ip as string)
     );
     for (const ip of detectNewSourceIps(events, seenIpSet)) {
-      const existing = getFinding(deps.lensDb, 'source_ip', ip);
-      const finding = upsertFinding(
-        deps.lensDb,
-        applyTrigger(existing, 'new_source_ip', nowIso, 'source_ip', ip)
+      const r = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'source_ip', ip),
+        'new_source_ip',
+        nowIso,
+        'source_ip',
+        ip
       );
       markSeenSourceIp(deps.lensDb, ip, nowIso);
-      tryRuleTriage(deps, finding, sinceIso, nowIso);
+      routeIfNew(deps, r, sinceIso, undefined, nowIso);
       count++;
     }
     return count;
@@ -150,23 +230,23 @@ export function runHourlyChecks(
     );
     for (const ip of distinctIps) {
       if (!isInternalSource(ip, deps.lanCidrs)) continue;
-      const existing = getFinding(deps.lensDb, 'source_ip', ip);
-      const finding = upsertFinding(
-        deps.lensDb,
-        applyTrigger(existing, 'internal_source', nowIso, 'source_ip', ip)
+      const r = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'source_ip', ip),
+        'internal_source',
+        nowIso,
+        'source_ip',
+        ip
       );
       count++;
 
-      // Being on the LAN carries no security signal for a finding whose
-      // events are all non-security operational telemetry — every client is
-      // internal by definition, so the flag adds nothing there. Give it the
-      // same operational-noise auto-dismiss the new-source-ip loop already
-      // would, restricted to that one rule (see tryRuleTriage's allowedRules
-      // doc) — otherwise a purely-operational internal finding sits stuck at
-      // `new` until someone runs the admin backfill by hand.
-      if (finding.status !== 'closed') {
-        tryRuleTriage(deps, finding, sinceIso, nowIso, undefined, ['operational_noise']);
-      }
+      // A finding created here, or a rule-closed one this trigger just
+      // reopened, still goes through the rules — but only operational_noise
+      // may close it (matchRules enforces that for any internal_source
+      // finding). Being on the LAN carries no security signal for purely
+      // operational telemetry; anything else from an internal host is the
+      // "possible compromised host talking out" case and must reach AI.
+      routeIfNew(deps, r, sinceIso, undefined, nowIso, ['operational_noise']);
     }
     return count;
   });
@@ -177,34 +257,49 @@ export function runHourlyChecks(
   // run after deploy seeds findings for historical client-only alerts and
   // later runs behave like the new-source-ip check. Every client gets
   // internal_source (UniFi-named clients are LAN by definition) so client
-  // findings rank alongside internal IP findings. No rule triage. Only the
+  // findings rank alongside internal IP findings. No rule matches a client
+  // (matchRules returns null), so routing always queues for AI. Only the
   // client-only queries touch the sink v1.0.3 columns, so on an older sink
   // this check fails alone.
   touched += runCheck('client', () => {
     let count = 0;
     const newMacs = detectNewClients(allClientMacs(deps.sinkDb), seenClientMacs(deps.lensDb));
     for (const mac of newMacs) {
-      const withNew = upsertFinding(
-        deps.lensDb,
-        applyTrigger(getFinding(deps.lensDb, 'client', mac), 'new_client', nowIso, 'client', mac)
+      const withNew = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'client', mac),
+        'new_client',
+        nowIso,
+        'client',
+        mac
       );
-      upsertFinding(deps.lensDb, applyTrigger(withNew, 'internal_source', nowIso, 'client', mac));
+      const withInternal = recordTrigger(
+        deps,
+        withNew.finding,
+        'internal_source',
+        nowIso,
+        'client',
+        mac
+      );
+      // Route once, after both triggers are on the finding.
+      if (withNew.created || withNew.reopened || withInternal.reopened) {
+        routeToPipeline(deps, withInternal.finding, sinceIso, undefined, nowIso);
+      }
       markSeenClient(deps.lensDb, mac, nowIso);
       count++;
     }
     const newMacSet = new Set(newMacs);
     for (const mac of clientMacsSince(deps.sinkDb, sinceIso)) {
       if (newMacSet.has(mac)) continue;
-      upsertFinding(
-        deps.lensDb,
-        applyTrigger(
-          getFinding(deps.lensDb, 'client', mac),
-          'internal_source',
-          nowIso,
-          'client',
-          mac
-        )
+      const r = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'client', mac),
+        'internal_source',
+        nowIso,
+        'client',
+        mac
       );
+      routeIfNew(deps, r, sinceIso, undefined, nowIso);
       count++;
     }
     return count;
@@ -232,10 +327,15 @@ export function runHourlyChecks(
     for (const row of ipDayCounts) {
       const existing = getFinding(deps.lensDb, 'source_ip', row.source_ip);
       if (isSustained(row.days)) {
-        upsertFinding(
-          deps.lensDb,
-          applyTrigger(existing, 'repeat_offender', nowIso, 'source_ip', row.source_ip)
+        const r = recordTrigger(
+          deps,
+          existing,
+          'repeat_offender',
+          nowIso,
+          'source_ip',
+          row.source_ip
         );
+        routeIfNew(deps, r, windowStart, undefined, nowIso);
         count++;
       } else if (existing?.triggers.some((t) => t.type === 'repeat_offender' && t.active)) {
         upsertFinding(deps.lensDb, reevaluateTrigger(existing, 'repeat_offender', false, nowIso));
@@ -269,10 +369,8 @@ export function runHourlyChecks(
     for (const row of macDayCounts) {
       const existing = getFinding(deps.lensDb, 'client', row.mac);
       if (isSustained(row.days)) {
-        upsertFinding(
-          deps.lensDb,
-          applyTrigger(existing, 'repeat_offender', nowIso, 'client', row.mac)
-        );
+        const r = recordTrigger(deps, existing, 'repeat_offender', nowIso, 'client', row.mac);
+        routeIfNew(deps, r, windowStart, undefined, nowIso);
         count++;
       } else if (existing?.triggers.some((t) => t.type === 'repeat_offender' && t.active)) {
         upsertFinding(deps.lensDb, reevaluateTrigger(existing, 'repeat_offender', false, nowIso));
@@ -289,6 +387,34 @@ export function runHourlyChecks(
     return count;
   });
 
+  // Last activity: the recheck predicate compares last_activity_at against the
+  // last decision, so keep it at the newest event seen for each entity. Bumps
+  // only ever move it forward and don't count as touching a finding.
+  runCheck('last-activity', () => {
+    const bySourceIp = new Map<string, string>();
+    const bySignature = new Map<string, string>();
+    const keepMax = (m: Map<string, string>, key: string, at: string) => {
+      const prev = m.get(key);
+      if (prev === undefined || at > prev) m.set(key, at);
+    };
+    for (const e of events) {
+      if (e.source_ip) keepMax(bySourceIp, e.source_ip, e.received_at);
+      if (e.signature) keepMax(bySignature, signatureKey(e.category, e.signature), e.received_at);
+    }
+    for (const [ip, at] of bySourceIp) bumpLastActivity(deps.lensDb, 'source_ip', ip, at);
+    for (const [key, at] of bySignature) bumpLastActivity(deps.lensDb, 'signature', key, at);
+    return 0;
+  });
+
+  // Separate from 'last-activity' so an old sink (no client columns) loses
+  // only client activity.
+  runCheck('last-activity-client', () => {
+    for (const { mac, last_received_at } of clientLastActivitySince(deps.sinkDb, sinceIso)) {
+      bumpLastActivity(deps.lensDb, 'client', mac, last_received_at);
+    }
+    return 0;
+  });
+
   return { findingsTouched: touched };
 }
 
@@ -296,9 +422,12 @@ const BASELINE_HISTORY_LOOKBACK_DAYS = 30;
 
 export function runDailyAnomalyCheck(
   deps: RunnerDeps,
-  day: string = new Date(Date.now() - 86400000).toISOString().slice(0, 10)
+  day: string = new Date(Date.now() - 86400000).toISOString().slice(0, 10),
+  now: Date = new Date()
 ): { findingsTouched: number } {
-  const nowIso = new Date().toISOString();
+  const nowIso = now.toISOString();
+  const dayStart = `${day}T00:00:00.000Z`;
+  const dayEnd = new Date(Date.parse(dayStart) + 24 * 3600 * 1000).toISOString();
 
   const touched = runCheck('daily-anomaly', () => {
     let count = 0;
@@ -365,8 +494,15 @@ export function runDailyAnomalyCheck(
 
       const key = signatureKey(row.category, row.signature);
       activeAnomalies.add(key);
-      const existing = getFinding(deps.lensDb, 'signature', key);
-      upsertFinding(deps.lensDb, applyTrigger(existing, 'anomaly', nowIso, 'signature', key));
+      const r = recordTrigger(
+        deps,
+        getFinding(deps.lensDb, 'signature', key),
+        'anomaly',
+        nowIso,
+        'signature',
+        key
+      );
+      routeIfNew(deps, r, dayStart, dayEnd, nowIso);
       count++;
     }
 
@@ -384,31 +520,59 @@ export function runDailyAnomalyCheck(
   return { findingsTouched: touched };
 }
 
+export interface RecheckResult {
+  checked: number;
+  stillClosed: number;
+  requeued: number;
+}
+
+// Daily recheck of closed findings that saw new activity since their last
+// decision (isRecheckDue also rate-limits each finding to once per 24h). A
+// rule that still explains everything since that decision keeps it closed;
+// anything else goes back to the AI queue as a recheck. Client findings never
+// match a rule, so new client activity always requeues.
+export function runDailyRecheck(deps: RunnerDeps, now: Date = new Date()): RecheckResult {
+  const nowIso = now.toISOString();
+  const result: RecheckResult = { checked: 0, stillClosed: 0, requeued: 0 };
+  const due = listFindings(deps.lensDb, { view: 'closed' }).filter((f) => isRecheckDue(f, nowIso));
+  for (const finding of due) {
+    result.checked++;
+    runCheck(`recheck ${finding.entity_type} ${finding.entity_key}`, () => {
+      const match = matchRules(deps, finding, decisionWindowStart(finding));
+      if (match) {
+        recheckStillClosed(deps.lensDb, finding, match, nowIso);
+        result.stillClosed++;
+      } else {
+        recheckRequeue(deps.lensDb, finding, nowIso);
+        result.requeued++;
+      }
+      return 1;
+    });
+  }
+  return result;
+}
+
 export interface BackfillResult {
   checked: number;
-  dismissed: number;
+  closed: number;
   byRule: Record<RuleName, number>;
 }
 
-// One-off catch-up for findings created before rule-based triage existed (or
-// before it was configured) — the live path only ever evaluates a finding at
-// the moment it's created, so anything already sitting in the findings table
-// as 'new'/'acknowledged' never gets a rule pass otherwise. Re-checks every
-// such finding against the same three rules, reproducing the live path's own
-// window relative to `first_seen`: `first_seen` is stamped with the
-// detection *run* time (`nowIso` in runHourlyChecks), sitting at the *end*
-// of the trailing 24h window the live path scanned, not the start — the
-// underlying events that triggered detection are all *before* first_seen,
-// not after it. So the backfill window is `[first_seen - 24h, first_seen)`,
-// not `[first_seen, first_seen + 24h)`. Runs against every candidate finding
-// regardless of whether it already has an AI-answered analysis request — a
-// rule match adds a second, rule-sourced request and dismisses the finding
-// either way.
-export function runRuleTriageBackfill(deps: RunnerDeps): BackfillResult {
-  const nowIso = new Date().toISOString();
+// Catch-up rule pass over findings still waiting on AI (triaging) — e.g. ones
+// created before a rule existed or before TRUSTED_ADMIN_NAMES was configured.
+// The live path only evaluates a finding at the moment it's created, so this
+// reproduces the live path's own window relative to `first_seen`: `first_seen`
+// is stamped with the detection *run* time (`nowIso` in runHourlyChecks),
+// sitting at the *end* of the trailing 24h window the live path scanned, not
+// the start — the underlying events that triggered detection are all *before*
+// first_seen, not after it. So the backfill window is
+// `[first_seen - 24h, first_seen)`, not `[first_seen, first_seen + 24h)`. A
+// match closes the finding by rule, which cancels its pending AI request.
+export function runRuleTriageBackfill(deps: RunnerDeps, now: Date = new Date()): BackfillResult {
+  const nowIso = now.toISOString();
   const result: BackfillResult = {
     checked: 0,
-    dismissed: 0,
+    closed: 0,
     byRule: {
       admin_login: 0,
       operational_noise: 0,
@@ -420,10 +584,10 @@ export function runRuleTriageBackfill(deps: RunnerDeps): BackfillResult {
     },
   };
 
-  // Client findings get no rule triage (see tryRuleTriage's guard), so they
+  // Client findings get no rule triage (see matchRules' guard), so they
   // aren't candidates at all — keeps `checked` honest.
-  const candidates = listFindings(deps.lensDb, { view: 'all' }).filter(
-    (f) => f.entity_type !== 'client' && f.status !== 'closed'
+  const candidates = listFindings(deps.lensDb, { view: 'triaging' }).filter(
+    (f) => f.entity_type !== 'client'
   );
 
   for (const finding of candidates) {
@@ -432,10 +596,11 @@ export function runRuleTriageBackfill(deps: RunnerDeps): BackfillResult {
     const sinceIso = new Date(
       new Date(finding.first_seen).getTime() - NEW_ENTITY_WINDOW_HOURS * 3600 * 1000
     ).toISOString();
-    const outcome = tryRuleTriage(deps, finding, sinceIso, nowIso, untilIso);
-    if (outcome.matched && outcome.rule) {
-      result.dismissed++;
-      result.byRule[outcome.rule]++;
+    const match = matchRules(deps, finding, sinceIso, untilIso);
+    if (match) {
+      closeByRule(deps.lensDb, finding, match, nowIso);
+      result.closed++;
+      result.byRule[match.rule]++;
     }
   }
 

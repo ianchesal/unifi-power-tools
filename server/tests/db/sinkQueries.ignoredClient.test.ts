@@ -13,7 +13,7 @@ vi.mock('../../src/analysis/newEntity.js', async (importOriginal) => {
   };
 });
 
-const { allClientMacs, clientDayCounts, clientMacsSince, eventsForClientMac } = await import(
+const { allClientMacs, clientDayCounts, clientLastActivitySince, clientMacsSince, eventsForClientMac } = await import(
   '../../src/db/sinkQueries.js'
 );
 
@@ -40,5 +40,6 @@ describe('client queries exclude ignored signatures', () => {
     expect(clientMacsSince(sink, '2026-11-01T00:00:00Z')).toEqual(['aa:aa:aa:aa:aa:02']);
     expect(clientDayCounts(sink, '2026-11-01T00:00:00Z').map((r) => r.mac)).toEqual(['aa:aa:aa:aa:aa:02']);
     expect(eventsForClientMac(sink, 'aa:aa:aa:aa:aa:01')).toEqual([]);
+    expect(clientLastActivitySince(sink, '2026-11-01T00:00:00Z').map((r) => r.mac)).toEqual(['aa:aa:aa:aa:aa:02']);
   });
 });

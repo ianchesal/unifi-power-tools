@@ -1,4 +1,9 @@
-import { type RunnerDeps, runDailyAnomalyCheck, runHourlyChecks } from './analysis/runner.js';
+import {
+  type RunnerDeps,
+  runDailyAnomalyCheck,
+  runDailyRecheck,
+  runHourlyChecks,
+} from './analysis/runner.js';
 import { loadConfig } from './config.js';
 import { openLensDb } from './db/lensDb.js';
 import { openSinkDb, type SinkDb, verifySchema } from './db/sinkDb.js';
@@ -60,9 +65,11 @@ function runChecksSafely(): void {
 runChecksSafely();
 const hourlyTimer = setInterval(runChecksSafely, 60 * 60 * 1000);
 
+// Anomaly check first, so a finding it creates is routed before the recheck
+// runs; each step in its own try/catch so one failing can't skip the other.
 function runDailyCheckSafely(): void {
   if (!runnerDeps) {
-    logger.warn('Skipping daily anomaly check: sink DB unavailable');
+    logger.warn('Skipping daily anomaly check and recheck: sink DB unavailable');
     return;
   }
   try {
@@ -70,6 +77,14 @@ function runDailyCheckSafely(): void {
     logger.info(`Daily anomaly check touched ${daily.findingsTouched} finding(s)`);
   } catch (err) {
     logger.error('Daily anomaly check failed', err);
+  }
+  try {
+    const recheck = runDailyRecheck(runnerDeps);
+    logger.info(
+      `Daily recheck: ${recheck.checked} checked, ${recheck.requeued} requeued, ${recheck.stillClosed} still closed`
+    );
+  } catch (err) {
+    logger.error('Daily recheck failed', err);
   }
 }
 

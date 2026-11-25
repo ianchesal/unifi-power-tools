@@ -92,7 +92,7 @@ describe('createApp /api/admin/backfill-rule-triage', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       checked: 0,
-      dismissed: 0,
+      closed: 0,
       byRule: {
         admin_login: 0,
         operational_noise: 0,
