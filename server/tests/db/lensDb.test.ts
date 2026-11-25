@@ -14,6 +14,7 @@ describe('openLensDb', () => {
       'seen_source_ips',
       'findings',
       'analysis_requests',
+      'seen_clients',
     ]) {
       expect(tables).toContain(t);
     }

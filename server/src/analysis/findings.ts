@@ -3,10 +3,11 @@ export type TriggerType =
   | 'repeat_offender'
   | 'new_signature'
   | 'new_source_ip'
+  | 'new_client'
   | 'internal_source';
 
 // Only these two triggers represent an ongoing condition that can revert —
-// see spec "Auto-resolve": a first-seen event or an IP's internal-ness
+// see spec "Auto-resolve": a first-seen event (signature, IP or client) or an IP's internal-ness
 // can't "un-happen", so those trigger types always require manual dismissal.
 export const STANDING_TRIGGER_TYPES: TriggerType[] = ['anomaly', 'repeat_offender'];
 
@@ -21,7 +22,7 @@ export type FindingStatus = 'new' | 'acknowledged' | 'dismissed' | 'resolved';
 
 export interface Finding {
   id?: number;
-  entity_type: 'signature' | 'source_ip';
+  entity_type: 'signature' | 'source_ip' | 'client';
   entity_key: string;
   first_seen: string;
   last_seen: string;
@@ -35,6 +36,7 @@ const TRIGGER_WEIGHTS: Record<TriggerType, number> = {
   repeat_offender: 2,
   new_signature: 2,
   new_source_ip: 1,
+  new_client: 1,
   internal_source: 3,
 };
 

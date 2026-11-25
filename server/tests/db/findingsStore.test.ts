@@ -5,7 +5,9 @@ import {
   getFinding,
   hasSeenSourceIp,
   listFindings,
+  markSeenClient,
   markSeenSourceIp,
+  seenClientMacs,
   setFindingStatus,
   upsertFinding,
 } from '../../src/db/findingsStore.js';
@@ -51,5 +53,13 @@ describe('findingsStore', () => {
   it('setFindingStatus returns null for a nonexistent finding id', () => {
     const db = openLensDb(':memory:');
     expect(setFindingStatus(db, 999, 'dismissed')).toBeNull();
+  });
+
+  it('tracks seen client MACs', () => {
+    const db = openLensDb(':memory:');
+    expect(seenClientMacs(db)).toEqual(new Set());
+    markSeenClient(db, 'aa:bb:cc:dd:ee:ff', 't0');
+    markSeenClient(db, 'aa:bb:cc:dd:ee:ff', 't1');
+    expect(seenClientMacs(db)).toEqual(new Set(['aa:bb:cc:dd:ee:ff']));
   });
 });

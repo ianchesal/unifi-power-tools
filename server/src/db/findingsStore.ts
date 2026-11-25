@@ -136,3 +136,14 @@ export function markSeenSourceIp(db: LensDb, sourceIp: string, now: string): voi
     .prepare('INSERT OR IGNORE INTO seen_source_ips (source_ip, first_seen) VALUES (?, ?)')
     .run(sourceIp, now);
 }
+
+export function seenClientMacs(db: LensDb): Set<string> {
+  const rows = db.conn.prepare('SELECT mac FROM seen_clients').all() as { mac: string }[];
+  return new Set(rows.map((r) => r.mac));
+}
+
+export function markSeenClient(db: LensDb, mac: string, now: string): void {
+  db.conn
+    .prepare('INSERT OR IGNORE INTO seen_clients (mac, first_seen) VALUES (?, ?)')
+    .run(mac, now);
+}

@@ -57,6 +57,10 @@ const MIGRATIONS: { version: number; sql: string }[] = [
     version: 2,
     sql: `ALTER TABLE analysis_requests ADD COLUMN source TEXT NOT NULL DEFAULT 'ai';`,
   },
+  {
+    version: 3,
+    sql: `CREATE TABLE seen_clients (mac TEXT NOT NULL PRIMARY KEY, first_seen TEXT NOT NULL);`,
+  },
 ];
 
 export function openLensDb(path: string): LensDb {
