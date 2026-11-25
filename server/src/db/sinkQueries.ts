@@ -273,19 +273,21 @@ export function clientDayCounts(db: SinkDb, sinceIso: string): { mac: string; da
 
 // Display-only: the most recent non-null name seen for each MAC on any row
 // (not just client-only ones — a name observed alongside an IP is still the
-// best label for the host).
+// best label for the host). One row per MAC: SQLite's bare-column rule takes
+// source_client_name from the row that supplies MAX(received_at), so a chatty
+// client (thousands of C2 keepalives) doesn't ship every row to JS on each
+// dashboard refresh.
 export function latestClientNames(db: SinkDb, macs: string[]): Map<string, string> {
-  const names = new Map<string, string>();
-  if (macs.length === 0) return names;
+  if (macs.length === 0) return new Map();
   const rows = db.conn
     .prepare(
-      `SELECT source_client_mac AS mac, source_client_name AS name FROM events
+      `SELECT source_client_mac AS mac, source_client_name AS name, MAX(received_at) AS latest
+       FROM events
        WHERE source_client_mac IN (${macs.map(() => '?').join(', ')}) AND source_client_name IS NOT NULL
-       ORDER BY received_at ASC`
+       GROUP BY source_client_mac`
     )
     .all(...macs) as { mac: string; name: string }[];
-  for (const r of rows) names.set(r.mac, r.name);
-  return names;
+  return new Map(rows.map((r) => [r.mac, r.name]));
 }
 
 export function eventsForClientMac(db: SinkDb, mac: string, limit = 20): ClientStoredEvent[] {

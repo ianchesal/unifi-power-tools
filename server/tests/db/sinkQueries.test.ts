@@ -230,6 +230,17 @@ describe('client queries', () => {
     expect(latestClientNames(db, []).size).toBe(0);
   });
 
+  it('latestClientNames picks the newest by received_at, not insertion order', () => {
+    const db = clientDb();
+    db.conn
+      .prepare(
+        `INSERT INTO events (received_at, category, source_client_mac, source_client_name, raw, parsed)
+         VALUES ('2026-10-01T00:00:00Z', 'ips_alert', 'aa:aa:aa:aa:aa:01', 'ancient-name', 'raw-line', 1)`
+      )
+      .run();
+    expect(latestClientNames(db, ['aa:aa:aa:aa:aa:01']).get('aa:aa:aa:aa:aa:01')).toBe('tranq-renamed');
+  });
+
   it('eventsForClientMac returns client-only events for the MAC, newest first, with client columns', () => {
     const events = eventsForClientMac(clientDb(), 'aa:aa:aa:aa:aa:01');
     expect(events).toHaveLength(2);
