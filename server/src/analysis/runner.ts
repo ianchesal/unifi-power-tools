@@ -281,8 +281,10 @@ export function runHourlyChecks(
         'client',
         mac
       );
-      // Route once, after both triggers are on the finding.
-      if (withNew.created || withNew.reopened || withInternal.reopened) {
+      // Route once, after both triggers are on the finding. (A client is never
+      // rule-closed, so new_client can't reopen one; only creation or the
+      // internal_source reopen can.)
+      if (withNew.created || withInternal.reopened) {
         routeToPipeline(deps, withInternal.finding, sinceIso, undefined, nowIso);
       }
       markSeenClient(deps.lensDb, mac, nowIso);
@@ -537,6 +539,7 @@ export function runDailyRecheck(deps: RunnerDeps, now: Date = new Date()): Reche
   const due = listFindings(deps.lensDb, { view: 'closed' }).filter((f) => isRecheckDue(f, nowIso));
   for (const finding of due) {
     result.checked++;
+    // runCheck for per-finding isolation; its return value is unused here.
     runCheck(`recheck ${finding.entity_type} ${finding.entity_key}`, () => {
       const match = matchRules(deps, finding, decisionWindowStart(finding));
       if (match) {
@@ -558,16 +561,46 @@ export interface BackfillResult {
   byRule: Record<RuleName, number>;
 }
 
-// Catch-up rule pass over findings still waiting on AI (triaging) — e.g. ones
+// The window the creation pass used for this finding, reproduced relative to
+// `first_seen`. `first_seen` is stamped with the detection *run* time, at the
+// *end* of the window that run scanned, so every window here ends at or before
+// it — never `[first_seen, first_seen + 24h)`. The creating trigger
+// (`triggers[0]`) picks the width:
+// - repeat_offender: `[first_seen - 14d, first_seen)`, the repeat-offender scan.
+// - anomaly: the anomaly day `[D, D+1)`, with D = date(first_seen - 24h) — the
+//   daily job judges the day before it runs, so this holds even if it ran late.
+// - anything else: `[first_seen - 24h, first_seen)`, the hourly scan.
+export function backfillWindow(finding: Finding): { sinceIso: string; untilIso: string } {
+  const firstSeenMs = Date.parse(finding.first_seen);
+  const hoursBefore = (h: number) => new Date(firstSeenMs - h * 3600 * 1000).toISOString();
+  switch (finding.triggers[0]?.type) {
+    case 'repeat_offender':
+      return {
+        sinceIso: hoursBefore(REPEAT_OFFENDER_WINDOW_DAYS * 24),
+        untilIso: new Date(firstSeenMs).toISOString(),
+      };
+    case 'anomaly': {
+      const dayStart = `${hoursBefore(24).slice(0, 10)}T00:00:00.000Z`;
+      return {
+        sinceIso: dayStart,
+        untilIso: new Date(Date.parse(dayStart) + 24 * 3600 * 1000).toISOString(),
+      };
+    }
+    default:
+      return {
+        sinceIso: hoursBefore(NEW_ENTITY_WINDOW_HOURS),
+        untilIso: new Date(firstSeenMs).toISOString(),
+      };
+  }
+}
+
+// Catch-up rule pass over findings still waiting on AI (triaging), e.g. ones
 // created before a rule existed or before TRUSTED_ADMIN_NAMES was configured.
 // The live path only evaluates a finding at the moment it's created, so this
-// reproduces the live path's own window relative to `first_seen`: `first_seen`
-// is stamped with the detection *run* time (`nowIso` in runHourlyChecks),
-// sitting at the *end* of the trailing 24h window the live path scanned, not
-// the start — the underlying events that triggered detection are all *before*
-// first_seen, not after it. So the backfill window is
-// `[first_seen - 24h, first_seen)`, not `[first_seen, first_seen + 24h)`. A
-// match closes the finding by rule, which cancels its pending AI request.
+// re-runs the rules over the same window that creation used (backfillWindow):
+// a narrower window could let recent matching events stand in for "every event
+// backing the finding" and close one creation deliberately queued. A match
+// closes the finding by rule, which cancels its pending AI request.
 export function runRuleTriageBackfill(deps: RunnerDeps, now: Date = new Date()): BackfillResult {
   const nowIso = now.toISOString();
   const result: BackfillResult = {
@@ -592,10 +625,7 @@ export function runRuleTriageBackfill(deps: RunnerDeps, now: Date = new Date()):
 
   for (const finding of candidates) {
     result.checked++;
-    const untilIso = finding.first_seen;
-    const sinceIso = new Date(
-      new Date(finding.first_seen).getTime() - NEW_ENTITY_WINDOW_HOURS * 3600 * 1000
-    ).toISOString();
+    const { sinceIso, untilIso } = backfillWindow(finding);
     const match = matchRules(deps, finding, sinceIso, untilIso);
     if (match) {
       closeByRule(deps.lensDb, finding, match, nowIso);

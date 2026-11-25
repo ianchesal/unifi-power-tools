@@ -19,6 +19,7 @@ import {
 import { listHistory } from '../../src/db/findingHistoryStore.js';
 import { applyTrigger, type ClosedBy, type Finding } from '../../src/analysis/findings.js';
 import {
+  backfillWindow,
   runDailyAnomalyCheck,
   runDailyRecheck,
   runHourlyChecks,
@@ -219,6 +220,16 @@ describe('runHourlyChecks', () => {
     ]);
     runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date('2026-08-31T12:00:00Z'));
 
+    expect(getFinding(lensDb, 'source_ip', '203.0.113.5')?.last_activity_at).toBe('2026-08-31T11:00:00.000Z');
+    expect(getFinding(lensDb, 'signature', 'ips_alert|ET SCAN Nmap')?.last_activity_at).toBe(
+      '2026-08-31T11:30:00.000Z'
+    );
+
+    // Never backwards: a later pass that only sees older events leaves it alone.
+    const olderOnly = seededSinkDb([
+      { received_at: '2026-08-31T09:30:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
+    ]);
+    runHourlyChecks(runnerDeps(olderOnly, lensDb), new Date('2026-08-31T13:00:00Z'));
     expect(getFinding(lensDb, 'source_ip', '203.0.113.5')?.last_activity_at).toBe('2026-08-31T11:00:00.000Z');
     expect(getFinding(lensDb, 'signature', 'ips_alert|ET SCAN Nmap')?.last_activity_at).toBe(
       '2026-08-31T11:30:00.000Z'
@@ -494,18 +505,21 @@ describe('runDailyRecheck', () => {
   // whose events are the given rows.
   function closedWithActivity(
     rows: Parameters<typeof seededSinkDb>[0],
-    opts: { by?: ClosedBy; internal?: boolean } = {}
+    opts: { by?: ClosedBy; ip?: string; lanCidrs?: string[] } = {}
   ) {
+    const ip = opts.ip ?? '203.0.113.5';
+    const lanCidrs = opts.lanCidrs ?? [];
     const lensDb = openLensDb(':memory:');
-    let f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', t0, 'source_ip', '203.0.113.5'));
-    if (opts.internal) f = upsertFinding(lensDb, applyTrigger(f, 'internal_source', t0, 'source_ip', '203.0.113.5'));
+    let f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', t0, 'source_ip', ip));
+    if (lanCidrs.length) f = upsertFinding(lensDb, applyTrigger(f, 'internal_source', t0, 'source_ip', ip));
     closeAs(lensDb, f, opts.by ?? 'rule', t0);
-    markSeenSourceIp(lensDb, '203.0.113.5', t0);
+    markSeenSourceIp(lensDb, ip, t0);
     for (const r of rows) if (r.signature) markSeenSignature(lensDb, r.category, r.signature, t0);
     const sinkDb = seededSinkDb(rows);
+    const deps = runnerDeps(sinkDb, lensDb, { lanCidrs });
     // The hourly pass is what moves last_activity_at forward.
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() - HOUR));
-    return { lensDb, sinkDb, deps: runnerDeps(sinkDb, lensDb) };
+    runHourlyChecks(deps, new Date(now.getTime() - HOUR));
+    return { lensDb, sinkDb, deps };
   }
 
   const blockedDrop = { received_at: '2026-08-22T10:00:00.000Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.5', action: 'blocked' };
@@ -546,10 +560,23 @@ describe('runDailyRecheck', () => {
     expect(runDailyRecheck(deps, now)).toEqual({ checked: 0, stillClosed: 0, requeued: 0 });
   });
 
-  it('applies the internal-source restriction on recheck', () => {
-    const { lensDb, deps } = closedWithActivity([blockedDrop], { by: 'ai', internal: true });
-    expect(runDailyRecheck(deps, now)).toEqual({ checked: 1, stillClosed: 0, requeued: 1 });
-    expect(byKey(lensDb, '203.0.113.5')?.status).toBe('triaging');
+  for (const by of ['ai', 'rule'] as const) {
+    it(`applies the internal-source restriction on recheck (closed by ${by})`, () => {
+      const lan = { ip: '10.0.30.5', lanCidrs: ['10.0.0.0/8'] };
+      const { lensDb, deps } = closedWithActivity([{ ...blockedDrop, source_ip: lan.ip }], { by, ...lan });
+      expect(runDailyRecheck(deps, now)).toEqual({ checked: 1, stillClosed: 0, requeued: 1 });
+      expect(byKey(lensDb, lan.ip)?.status).toBe('triaging');
+    });
+  }
+
+  it('an internal finding whose new activity is all operational noise stays closed on recheck', () => {
+    const lan = { ip: '10.0.30.43', lanCidrs: ['10.0.0.0/8'] };
+    const { lensDb, deps } = closedWithActivity(
+      [{ received_at: '2026-08-22T10:00:00.000Z', category: 'unifi_devices', signature: '514', source_ip: lan.ip }],
+      lan
+    );
+    expect(runDailyRecheck(deps, now)).toEqual({ checked: 1, stillClosed: 1, requeued: 0 });
+    expect(byKey(lensDb, lan.ip)?.status).toBe('closed');
   });
 
   it('ignores attention and triaging findings', () => {
@@ -589,6 +616,29 @@ describe('runDailyRecheck', () => {
     const f = byKey(lensDb, MAC);
     expect(f?.status).toBe('triaging');
     expect(getPendingRequestForFinding(lensDb, f?.id as number)?.is_recheck).toBe(1);
+  });
+});
+
+describe('backfillWindow', () => {
+  const at = (type: Parameters<typeof applyTrigger>[1], firstSeen: string) =>
+    backfillWindow(applyTrigger(null, type, firstSeen, 'source_ip', '203.0.113.5'));
+
+  it('picks the window from the creating trigger', () => {
+    expect(at('new_source_ip', '2026-08-20T12:00:00.000Z')).toEqual({
+      sinceIso: '2026-08-19T12:00:00.000Z',
+      untilIso: '2026-08-20T12:00:00.000Z',
+    });
+    expect(at('repeat_offender', '2026-08-20T12:00:00.000Z')).toEqual({
+      sinceIso: '2026-08-06T12:00:00.000Z',
+      untilIso: '2026-08-20T12:00:00.000Z',
+    });
+    // On-time (00:10) and late (23:50) daily runs both judge the previous day.
+    for (const firstSeen of ['2026-08-20T00:10:00.000Z', '2026-08-20T23:50:00.000Z']) {
+      expect(at('anomaly', firstSeen)).toEqual({
+        sinceIso: '2026-08-19T00:00:00.000Z',
+        untilIso: '2026-08-20T00:00:00.000Z',
+      });
+    }
   });
 });
 
@@ -659,6 +709,47 @@ describe('runRuleTriageBackfill', () => {
     expect(after?.closed_at).toBe('2026-08-25T00:00:00.000Z');
     expect(getPendingRequestForFinding(lensDb, f.id as number)).toBeNull();
     expect(kinds(lensDb, after)).toEqual(['request_cancelled', 'rule_closed']);
+  });
+
+  it('uses the 14-day window for a repeat-offender finding: older unexplained events keep it triaging', () => {
+    const sinkDb = seededSinkDb([
+      // Days 1-10 of the window: allowed, non-blocklist hits the rule can't explain.
+      { received_at: '2026-08-08T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.20', action: 'allowed' },
+      { received_at: '2026-08-12T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.20', action: 'allowed' },
+      // Last 24h: only blocked ET DROP hits, which a 24h window would wrongly accept.
+      { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.20', action: 'blocked' },
+    ]);
+    const lensDb = openLensDb(':memory:');
+    const f = upsertFinding(lensDb, applyTrigger(null, 'repeat_offender', firstSeen, 'source_ip', '203.0.113.20'));
+    createAnalysisRequest(lensDb, f.id as number, firstSeen);
+
+    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb))).toMatchObject({ checked: 1, closed: 0 });
+    expectQueued(lensDb, byKey(lensDb, '203.0.113.20'));
+  });
+
+  it('closes a repeat-offender finding when every event in its 14-day window matches', () => {
+    const sinkDb = seededSinkDb([
+      { received_at: '2026-08-08T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.21', action: 'blocked' },
+      { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.21', action: 'blocked' },
+    ]);
+    const lensDb = openLensDb(':memory:');
+    upsertFinding(lensDb, applyTrigger(null, 'repeat_offender', firstSeen, 'source_ip', '203.0.113.21'));
+
+    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
+  });
+
+  it('uses the anomaly day (the day before first_seen) for an anomaly finding, even when the run was late', () => {
+    // Daily job for 2026-08-19 ran late, at 18:00 on the 20th. The anomaly day
+    // is all blocked ET DROP; the 20th itself has an allowed hit that a
+    // [first_seen - 24h, first_seen) window would include.
+    const sinkDb = seededSinkDb([
+      { received_at: '2026-08-19T03:00:00Z', category: 'ips_alert', signature: 'ET DROP Spike', source_ip: '203.0.113.1', action: 'blocked' },
+      { received_at: '2026-08-20T06:00:00Z', category: 'ips_alert', signature: 'ET DROP Spike', source_ip: '203.0.113.1', action: 'allowed' },
+    ]);
+    const lensDb = openLensDb(':memory:');
+    upsertFinding(lensDb, applyTrigger(null, 'anomaly', '2026-08-20T18:00:00.000Z', 'signature', 'ips_alert|ET DROP Spike'));
+
+    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
   });
 
   it('anchors the completeness window to [first_seen - 24h, first_seen), not to now', () => {
