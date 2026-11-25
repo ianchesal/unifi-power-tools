@@ -35,6 +35,13 @@ export function ClosedList({ refreshKey, onChanged }: { refreshKey: number; onCh
     if (q) params.set('q', q);
     fetchJson<{ items: Finding[]; total: number }>(`/api/findings?${params}`)
       .then(({ items, total: t }) => {
+        // The last row on the last page was reopened/re-analyzed (or a filter
+        // shrank the set): step back to the last page that has rows.
+        const lastPage = Math.max(0, Math.ceil(t / PAGE_SIZE) - 1);
+        if (page > lastPage) {
+          setPage(lastPage);
+          return;
+        }
         setFindings(items);
         setTotal(t);
         setLoadError(null);
@@ -102,6 +109,7 @@ export function ClosedList({ refreshKey, onChanged }: { refreshKey: number; onCh
             error={failure?.id === f.id ? failure.message : null}
             onChanged={handleChanged}
             onFailed={(message) => handleFailed(f.id, message)}
+            onClearError={() => setFailure((cur) => (cur?.id === f.id ? null : cur))}
           />
         ))}
       </div>
@@ -128,16 +136,28 @@ function ClosedRow({
   error,
   onChanged,
   onFailed,
+  onClearError,
 }: {
   finding: Finding;
   error: string | null;
   onChanged: () => void;
   onFailed: (message: string) => void;
+  onClearError: () => void;
 }) {
   const [reopening, setReopening] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const openNote = () => {
+    onClearError();
+    setReopening(true);
+  };
+  const cancelNote = () => {
+    onClearError();
+    setReopening(false);
+  };
+
   const run = async (action: () => Promise<unknown>) => {
+    onClearError();
     setBusy(true);
     try {
       await action();
@@ -160,7 +180,7 @@ function ClosedRow({
       <FindingIdentity finding={finding} badge={badge} />
       {finding.closed_reason && <p className="analysis-body">{finding.closed_reason}</p>}
       <div className="finding-actions">
-        <button className="btn btn-danger-ghost" type="button" disabled={busy} onClick={() => setReopening(true)}>
+        <button className="btn btn-danger-ghost" type="button" disabled={busy} onClick={openNote}>
           This was wrong
         </button>
         <button
@@ -180,7 +200,7 @@ function ClosedRow({
           required
           busy={busy}
           onConfirm={(note) => run(() => postJson(`/api/findings/${finding.id}/reopen`, { note }))}
-          onCancel={() => setReopening(false)}
+          onCancel={cancelNote}
         />
       )}
       {error && <p className="action-error">{error}</p>}

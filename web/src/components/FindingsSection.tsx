@@ -80,6 +80,7 @@ function AttentionList({ refreshKey, onChanged }: { refreshKey: number; onChange
               setFailure({ id: f.id, message });
               setReloadKey((k) => k + 1);
             }}
+            onClearError={() => setFailure((cur) => (cur?.id === f.id ? null : cur))}
           />
         ))}
       </div>

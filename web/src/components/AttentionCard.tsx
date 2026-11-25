@@ -28,17 +28,20 @@ type CloseKind = 'handled' | 'not_concern';
 
 // `error` is the message from this card's last failed action (owned by the
 // list, so it survives the reload that follows a failure). `onFailed` reports
-// one; `onChanged` is called after a successful action.
+// one; `onClearError` drops it when the operator cancels or starts a new
+// action; `onChanged` is called after a successful action.
 export function AttentionCard({
   finding,
   error,
   onChanged,
   onFailed,
+  onClearError,
 }: {
   finding: Finding;
   error: string | null;
   onChanged: () => void;
   onFailed: (message: string) => void;
+  onClearError: () => void;
 }) {
   const analysis = finding.latest_analysis;
   const hasRecommendation = analysis?.verdict === 'attention';
@@ -66,7 +69,17 @@ export function AttentionCard({
       .catch(() => setHistoryError(true));
   }, [needHistory, history, historyStamp, finding.id]);
 
+  const openNote = (kind: CloseKind) => {
+    onClearError();
+    setClosing(kind);
+  };
+  const cancelNote = () => {
+    onClearError();
+    setClosing(null);
+  };
+
   const run = async (action: () => Promise<unknown>) => {
+    onClearError();
     setBusy(true);
     try {
       await action();
@@ -135,10 +148,10 @@ export function AttentionCard({
       )}
 
       <div className="finding-actions">
-        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => setClosing('handled')}>
+        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => openNote('handled')}>
           Handled
         </button>
-        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => setClosing('not_concern')}>
+        <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => openNote('not_concern')}>
           Not a concern
         </button>
         <button className="btn btn-ghost" type="button" onClick={() => setViewingEvents(true)}>
@@ -158,7 +171,7 @@ export function AttentionCard({
           placeholder={closing === 'handled' ? 'What did you do?' : "Why isn't this a concern?"}
           busy={busy}
           onConfirm={(note) => close(closing, note)}
-          onCancel={() => setClosing(null)}
+          onCancel={cancelNote}
         />
       )}
 
