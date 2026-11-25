@@ -1,3 +1,4 @@
+import { CLIENT_SECURITY_CATEGORIES, IGNORED_SIGNATURE_KEYS } from '../analysis/newEntity.js';
 import type { SinkDb } from './sinkDb.js';
 
 export interface StoredEvent {
@@ -209,4 +210,91 @@ export function auditCandidateEvents(
   return db.conn
     .prepare('SELECT category, message FROM events WHERE source_ip = ? AND received_at >= ?')
     .all(sourceIp, sinceIso) as unknown as { category: string; message: string | null }[];
+}
+
+// ---------------------------------------------------------------------------
+// Client-only queries (sink >= v1.0.3). These are the ONLY queries that may
+// reference the source_client_* / dest_client_* columns: every existing query
+// above deliberately leaves them out, so a sink older than v1.0.3 loses only
+// client features (failing inside the client runCheck / API branch) while IP
+// and signature analysis keeps working. See
+// docs/superpowers/specs/2026-11-25-client-entities-design.md.
+// ---------------------------------------------------------------------------
+
+export interface ClientStoredEvent extends StoredEvent {
+  source_client_name: string | null;
+  source_client_mac: string | null;
+  dest_client_name: string | null;
+  dest_client_mac: string | null;
+}
+
+// "Client-only Security event": UniFi named the LAN host by MAC with no IP,
+// in one of the categories the sink maps UNIFIcategory = 'Security' to.
+// Ignored signatures are excluded the same way the runner excludes them.
+function clientOnlyWhere(): { sql: string; params: string[] } {
+  const ignored = [...IGNORED_SIGNATURE_KEYS];
+  const categoryPlaceholders = CLIENT_SECURITY_CATEGORIES.map(() => '?').join(', ');
+  const ignoredSql = ignored.length
+    ? ` AND (category || '|' || COALESCE(signature, '')) NOT IN (${ignored.map(() => '?').join(', ')})`
+    : '';
+  return {
+    sql: `source_ip IS NULL AND source_client_mac IS NOT NULL AND category IN (${categoryPlaceholders})${ignoredSql}`,
+    params: [...CLIENT_SECURITY_CATEGORIES, ...ignored],
+  };
+}
+
+export function allClientMacs(db: SinkDb): string[] {
+  const where = clientOnlyWhere();
+  const rows = db.conn
+    .prepare(`SELECT DISTINCT source_client_mac AS mac FROM events WHERE ${where.sql}`)
+    .all(...where.params) as { mac: string }[];
+  return rows.map((r) => r.mac);
+}
+
+export function clientMacsSince(db: SinkDb, sinceIso: string): string[] {
+  const where = clientOnlyWhere();
+  const rows = db.conn
+    .prepare(
+      `SELECT DISTINCT source_client_mac AS mac FROM events WHERE received_at >= ? AND ${where.sql}`
+    )
+    .all(sinceIso, ...where.params) as { mac: string }[];
+  return rows.map((r) => r.mac);
+}
+
+export function clientDayCounts(db: SinkDb, sinceIso: string): { mac: string; days: number }[] {
+  const where = clientOnlyWhere();
+  return db.conn
+    .prepare(
+      `SELECT source_client_mac AS mac, COUNT(DISTINCT date(received_at)) AS days FROM events
+       WHERE received_at >= ? AND ${where.sql} GROUP BY source_client_mac`
+    )
+    .all(sinceIso, ...where.params) as { mac: string; days: number }[];
+}
+
+// Display-only: the most recent non-null name seen for each MAC on any row
+// (not just client-only ones — a name observed alongside an IP is still the
+// best label for the host).
+export function latestClientNames(db: SinkDb, macs: string[]): Map<string, string> {
+  const names = new Map<string, string>();
+  if (macs.length === 0) return names;
+  const rows = db.conn
+    .prepare(
+      `SELECT source_client_mac AS mac, source_client_name AS name FROM events
+       WHERE source_client_mac IN (${macs.map(() => '?').join(', ')}) AND source_client_name IS NOT NULL
+       ORDER BY received_at ASC`
+    )
+    .all(...macs) as { mac: string; name: string }[];
+  for (const r of rows) names.set(r.mac, r.name);
+  return names;
+}
+
+export function eventsForClientMac(db: SinkDb, mac: string, limit = 20): ClientStoredEvent[] {
+  const where = clientOnlyWhere();
+  return db.conn
+    .prepare(
+      `SELECT id, received_at, category, severity, source_ip, dest_ip, dest_port, action, signature, message, raw,
+              source_client_name, source_client_mac, dest_client_name, dest_client_mac
+       FROM events WHERE source_client_mac = ? AND ${where.sql} ORDER BY received_at DESC LIMIT ?`
+    )
+    .all(mac, ...where.params, limit) as unknown as ClientStoredEvent[];
 }
