@@ -75,6 +75,12 @@ describe('openLensDb', () => {
   });
 
   describe('migration 4 (triage redesign)', () => {
+    const T3 = '2026-01-03T00:00:00.000Z';
+    const T4 = '2026-01-04T00:00:00.000Z';
+    const T5 = '2026-01-05T00:00:00.000Z';
+    // A closed_at later than the migration run: the anchor keeps it.
+    const FUTURE = '2999-01-01T00:00:00.000Z';
+    const ISO_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
     // Hand-seeds a pre-migration (v1-v3) database, so openLensDb applies only v4.
     function seedLegacyDb(): string {
       const path = join(mkdtempSync(join(tmpdir(), 'lens-mig4-')), 'lens.db');
@@ -122,16 +128,16 @@ describe('openLensDb', () => {
          VALUES ('source_ip', ?, ?, ?, '[]', 0, ?)`
       );
       ins.run('A', 'f1', 't2', 'dismissed'); // id 1
-      ins.run('B', 'f1', 't3', 'dismissed'); // id 2
-      ins.run('C', 'f1', 't4', 'resolved'); // id 3
+      ins.run('B', 'f1', T3, 'dismissed'); // id 2
+      ins.run('C', 'f1', T4, 'resolved'); // id 3
       ins.run('D', 'f1', 't6', 'acknowledged'); // id 4
       ins.run('E', 'f1', 't7', 'new'); // id 5
-      ins.run('F', 'f1', 't8', 'dismissed'); // id 6
+      ins.run('F', 'f1', FUTURE, 'dismissed'); // id 6
       const req = raw.prepare(
         `INSERT INTO analysis_requests (finding_id, status, context, recommendation, source, created_at, answered_at)
          VALUES (?, ?, '{}', ?, ?, 'c', ?)`
       );
-      req.run(1, 'answered', 'rule says', 'rule', 't5');
+      req.run(1, 'answered', 'rule says', 'rule', T5);
       req.run(6, 'pending', null, 'ai', null);
       raw.close();
       return path;
@@ -141,29 +147,43 @@ describe('openLensDb', () => {
       db.conn.prepare('SELECT * FROM findings WHERE entity_key = ?').get(key) as any;
 
     it('maps legacy statuses and fills timestamps', () => {
-      const db = openLensDb(seedLegacyDb());
+      const path = seedLegacyDb();
+      const before = new Date().toISOString();
+      const db = openLensDb(path);
+      const after = new Date().toISOString();
       expect(row(db, 'A')).toMatchObject({
         status: 'closed',
         closed_by: 'rule',
         closed_reason: 'rule says',
-        closed_at: 't5',
-        last_activity_at: 't5',
-        last_triaged_at: 't5',
+        closed_at: T5,
         reopen_count: 0,
       });
       expect(row(db, 'B')).toMatchObject({
         status: 'closed',
         closed_by: 'human',
         closed_reason: 'Dismissed before triage redesign',
-        closed_at: 't3',
-        last_activity_at: 't3',
-        last_triaged_at: 't3',
+        closed_at: T3,
       });
       expect(row(db, 'C')).toMatchObject({
         status: 'closed',
         closed_by: 'system',
         closed_reason: 'Condition cleared (pre-redesign auto-resolve)',
-        closed_at: 't4',
+        closed_at: T4,
+      });
+      // Closed rows are anchored at the migration time (or closed_at, if later),
+      // so only activity after the upgrade makes them due for a recheck.
+      for (const key of ['A', 'B', 'C']) {
+        const r = row(db, key);
+        expect(r.last_activity_at).toMatch(ISO_Z);
+        expect(r.last_triaged_at).toBe(r.last_activity_at);
+        expect(r.last_activity_at >= r.closed_at).toBe(true);
+        expect(r.last_activity_at >= before && r.last_activity_at <= after).toBe(true);
+      }
+      expect(row(db, 'F')).toMatchObject({
+        status: 'closed',
+        closed_at: FUTURE,
+        last_activity_at: FUTURE,
+        last_triaged_at: FUTURE,
       });
       expect(row(db, 'D')).toMatchObject({
         status: 'attention',

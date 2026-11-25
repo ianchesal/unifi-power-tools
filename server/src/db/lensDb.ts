@@ -136,7 +136,12 @@ const MIGRATIONS: { version: number; sql: string }[] = [
           AND NOT EXISTS (
             SELECT 1 FROM analysis_requests r WHERE r.finding_id = findings.id AND r.status = 'pending');
 
-      UPDATE findings SET last_activity_at = closed_at, last_triaged_at = closed_at WHERE status = 'closed';
+      -- Anchor closed rows at the migration time (closed_at, if later) so only
+      -- activity after the upgrade makes them due for a recheck; closed_at stays.
+      UPDATE findings SET
+        last_activity_at = MAX(closed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        last_triaged_at = MAX(closed_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      WHERE status = 'closed';
       UPDATE findings SET last_activity_at = last_seen, last_triaged_at = last_seen WHERE status = 'attention';
       UPDATE findings SET last_activity_at = last_seen WHERE status = 'triaging';
     `,
