@@ -3,6 +3,7 @@ import { applyTrigger, FindingNotFoundError, TransitionError } from '../../src/a
 import type { Finding } from '../../src/analysis/findings.js';
 import type { RuleMatch } from '../../src/analysis/matchRules.js';
 import {
+  atomically,
   closeByRule,
   humanClose,
   humanReopen,
@@ -232,6 +233,69 @@ describe('pipeline', () => {
     expect(() => humanClose(db, 999, 'handled', null, 't')).toThrow(FindingNotFoundError);
     expect(() => humanReopen(db, 999, 'x', 't')).toThrow(FindingNotFoundError);
     expect(() => reanalyze(db, 999, 't')).toThrow(FindingNotFoundError);
+    db.close();
+  });
+
+  it('humanReopen from attention throws TransitionError', () => {
+    const db = openLensDb(':memory:');
+    const f = attentionFinding(db);
+    expect(() => humanReopen(db, f.id as number, 'why', 't1')).toThrow(TransitionError);
+    db.close();
+  });
+
+  it('recheck functions throw TransitionError from a non-closed finding', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    expect(() => recheckStillClosed(db, f, match('operational_noise'), 't1')).toThrow(
+      TransitionError
+    );
+    expect(() => recheckRequeue(db, f, 't1')).toThrow(TransitionError);
+    expect(getPendingRequestForFinding(db, f.id as number)).toBeNull();
+    db.close();
+  });
+
+  it('recheckRequeue and closeByRule use the stored row, not a stale caller copy', () => {
+    const db = openLensDb(':memory:');
+    const f = closedFinding(db);
+    recheckRequeue(db, f, 't1'); // reopen_count 1
+    updateFindingState(db, f.id as number, { status: 'closed', closed_by: 'rule', closed_at: 't2' });
+    const again = recheckRequeue(db, f, 't3'); // stale copy still says reopen_count 0
+    expect(again.reopen_count).toBe(2);
+    updateFindingState(db, f.id as number, { status: 'attention' });
+    expect(() => closeByRule(db, { ...f, status: 'triaging' }, match('operational_noise'), 't4')).toThrow(
+      TransitionError
+    );
+    db.close();
+  });
+
+  it('nested pipeline calls join the outer transaction and roll back together', () => {
+    const db = openLensDb(':memory:');
+    const a = attentionFinding(db);
+    const b = upsertFinding(
+      db,
+      applyTrigger(null, 'new_source_ip', 't0', 'source_ip', '203.0.113.9')
+    );
+    updateFindingState(db, b.id as number, { status: 'closed', closed_by: 'rule', closed_at: 't0' });
+    const boom = new Error('boom');
+    expect(() =>
+      atomically(db, () => {
+        humanClose(db, a.id as number, 'handled', null, 't1');
+        humanReopen(db, b.id as number, 'again', 't1');
+        expect(db.conn.isTransaction).toBe(true);
+        throw boom;
+      })
+    ).toThrow(boom);
+    expect(db.conn.isTransaction).toBe(false);
+    expect(getFindingById(db, a.id as number)?.status).toBe('attention');
+    expect(getFindingById(db, b.id as number)?.status).toBe('closed');
+    expect(listHistory(db, a.id as number)).toEqual([]);
+
+    atomically(db, () => {
+      humanClose(db, a.id as number, 'handled', null, 't2');
+      humanReopen(db, b.id as number, 'again', 't2');
+    });
+    expect(getFindingById(db, a.id as number)?.status).toBe('closed');
+    expect(getFindingById(db, b.id as number)?.status).toBe('attention');
     db.close();
   });
 });

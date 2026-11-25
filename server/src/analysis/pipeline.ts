@@ -21,16 +21,29 @@ const CLOSE_CLEARED: FindingStatePatch = {
   closed_at: null,
 };
 
-function atomically<T>(db: LensDb, fn: () => T): T {
+// Re-entrant: when the caller already holds a transaction, join it and let the
+// outermost owner commit or roll back.
+export function atomically<T>(db: LensDb, fn: () => T): T {
+  if (db.conn.isTransaction) return fn();
   db.conn.exec('BEGIN');
   try {
     const out = fn();
     db.conn.exec('COMMIT');
     return out;
   } catch (err) {
-    db.conn.exec('ROLLBACK');
+    try {
+      db.conn.exec('ROLLBACK');
+    } catch {
+      // SQLite may already have rolled back; surface the original error.
+    }
     throw err;
   }
+}
+
+// Fresh read for assertions made inside a transaction, so a stale caller copy
+// can't authorise a transition or lose a counter increment.
+function reload(db: LensDb, finding: Finding): Finding {
+  return loadFinding(db, finding.id as number);
 }
 
 function loadFinding(db: LensDb, id: number): Finding {
@@ -95,18 +108,19 @@ export function closeByRule(
   match: RuleMatch,
   nowIso: string
 ): Finding {
-  assertTransition('rule_close', finding);
   return atomically(db, () => {
-    cancelPending(db, finding, nowIso);
+    const current = reload(db, finding);
+    assertTransition('rule_close', current);
+    cancelPending(db, current, nowIso);
     const analysis = createAnsweredRuleAnalysis(
       db,
       finding.id as number,
-      { finding, rule: match.rule },
+      { finding: current, rule: match.rule },
       match.verdict.recommendation,
       match.verdict.riskLevel,
       nowIso
     );
-    const updated = apply(db, finding, {
+    const updated = apply(db, current, {
       status: 'closed',
       closed_by: 'rule',
       closed_reason: match.verdict.recommendation,
@@ -131,9 +145,10 @@ export function recheckStillClosed(
   match: RuleMatch,
   nowIso: string
 ): Finding {
-  assertTransition('recheck', finding);
   return atomically(db, () => {
-    const updated = apply(db, finding, { last_triaged_at: nowIso });
+    const current = reload(db, finding);
+    assertTransition('recheck', current);
+    const updated = apply(db, current, { last_triaged_at: nowIso });
     addHistory(db, {
       finding_id: finding.id as number,
       at: nowIso,
@@ -146,12 +161,13 @@ export function recheckStillClosed(
 }
 
 export function recheckRequeue(db: LensDb, finding: Finding, nowIso: string): Finding {
-  assertTransition('recheck', finding);
   return atomically(db, () => {
-    const updated = apply(db, finding, {
+    const current = reload(db, finding);
+    assertTransition('recheck', current);
+    const updated = apply(db, current, {
       ...CLOSE_CLEARED,
       status: 'triaging',
-      reopen_count: finding.reopen_count + 1,
+      reopen_count: current.reopen_count + 1,
     });
     const req = createAnalysisRequest(db, finding.id as number, nowIso, { isRecheck: true });
     addHistory(db, {
