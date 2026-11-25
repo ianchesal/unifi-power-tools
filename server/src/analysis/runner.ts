@@ -61,7 +61,7 @@ export interface RunnerDeps {
   homelabServices?: HomelabRegistry;
 }
 
-const NEW_ENTITY_WINDOW_HOURS = 24;
+export const NEW_ENTITY_WINDOW_HOURS = 24;
 
 interface RecentEventRow {
   received_at: string;

@@ -1,5 +1,6 @@
 import { decisionWindowStart, type Finding } from '../analysis/findings.js';
 import { splitSignatureKey } from '../analysis/newEntity.js';
+import { NEW_ENTITY_WINDOW_HOURS } from '../analysis/runner.js';
 import { type FindingWithDisplayName, withDisplayNames } from '../api/findings.js';
 import {
   type AnalysisRequestRow,
@@ -87,6 +88,31 @@ function recentEventsFor(sinkDb: SinkDb, finding: Finding): StoredEvent[] {
   return eventsForSignature(sinkDb, category, signature, RECENT_EVENTS_LIMIT);
 }
 
+// True when the finding is triaging only because internal_source reopened it
+// after a rule close: the last row that isn't a trigger_added/queued is the
+// rule_closed, with a trigger_added after it. closeByRule stamped
+// last_triaged_at with the run time, so a window starting there would hide the
+// very events that created the finding.
+function reopenedAfterRuleClose(finding: Finding, history: FindingHistoryRow[]): boolean {
+  if (finding.status !== 'triaging') return false;
+  let sawTrigger = false;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const { kind } = history[i];
+    if (kind === 'trigger_added') sawTrigger = true;
+    else if (kind !== 'queued') return kind === 'rule_closed' && sawTrigger;
+  }
+  return false;
+}
+
+function sinceLastDecisionStart(finding: Finding, history: FindingHistoryRow[]): string {
+  if (reopenedAfterRuleClose(finding, history)) {
+    return new Date(
+      Date.parse(finding.first_seen) - NEW_ENTITY_WINDOW_HOURS * 3600 * 1000
+    ).toISOString();
+  }
+  return decisionWindowStart(finding);
+}
+
 export async function buildAnalysisContext(
   deps: AnalysisDeps,
   request: AnalysisRequestRow,
@@ -101,6 +127,7 @@ export async function buildAnalysisContext(
   const priorAnalyses = getAnalysisRequestsForFinding(lensDb, finding.id as number)
     .filter((r) => r.status === 'answered' && r.id !== request.id)
     .map(({ context: _context, ...rest }) => rest);
+  const history = listHistory(lensDb, finding.id as number);
 
   let recentEvents: StoredEvent[] = [];
   let baselineHistory: BaselineRow[] = [];
@@ -114,7 +141,7 @@ export async function buildAnalysisContext(
       baselineHistory = getBaselineHistory(lensDb, category, signature);
     }
 
-    const since = decisionWindowStart(finding);
+    const since = sinceLastDecisionStart(finding, history);
     sinceLastDecision = orNull('since-last-decision counts', () => ({
       since,
       total: entityActivitySummary(sinkDb, type, key, since).total,
@@ -131,7 +158,7 @@ export async function buildAnalysisContext(
 
   return {
     finding: withDisplayNames(sinkDb, [finding])[0],
-    history: listHistory(lensDb, finding.id as number),
+    history,
     prior_analyses: priorAnalyses,
     knownClient,
     firewallSummary,

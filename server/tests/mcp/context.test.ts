@@ -7,13 +7,14 @@ import {
   type AnalysisRequestRow,
   getPendingRequestForFinding,
 } from '../../src/db/analysisRequestsStore.js';
-import { updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
+import { getFinding, updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import type { SinkDb } from '../../src/db/sinkDb.js';
 import type { HomelabRegistry } from '../../src/enrichment/homelabServices.js';
 import type { UnifiMcpClient } from '../../src/enrichment/unifiMcpClient.js';
 import { type AnalysisDeps, buildAnalysisContext } from '../../src/mcp/context.js';
-import { seededSinkDb } from '../helpers.js';
+import { runHourlyChecks } from '../../src/analysis/runner.js';
+import { runnerDeps, seededSinkDb } from '../helpers.js';
 
 const NOW = '2026-11-25T12:00:00.000Z';
 const FIRST_SEEN = '2026-11-20T00:00:00.000Z';
@@ -91,6 +92,31 @@ describe('buildAnalysisContext', () => {
     });
     expect(ctx.prior_analyses).toEqual([]);
     expect(ctx.recheck).toBeNull();
+  });
+
+  it('a finding reopened by internal_source after a rule close measures since_last_decision from its creation window', async () => {
+    const lensDb = openLensDb(':memory:');
+    const sinkDb = seededSinkDb([
+      // older than the creation window: not counted
+      { received_at: '2026-11-23T06:00:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
+      // the events that created the finding, inside [first_seen - 24h, now)
+      { received_at: '2026-11-25T11:30:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
+      { received_at: '2026-11-25T11:45:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
+    ]);
+    runHourlyChecks(runnerDeps(sinkDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), new Date(NOW));
+    const finding = getFinding(lensDb, 'source_ip', '10.0.30.5') as Finding;
+    // closeByRule stamped last_triaged_at with the run time, then internal_source reopened it.
+    expect(finding.status).toBe('triaging');
+    expect(finding.last_triaged_at).toBe(NOW);
+    const request = getPendingRequestForFinding(lensDb, finding.id as number) as AnalysisRequestRow;
+
+    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), request, finding, NOW);
+    expect(ctx.history.map((h) => h.kind)).toEqual(['created', 'rule_closed', 'trigger_added', 'queued']);
+    expect(ctx.since_last_decision).toEqual({
+      since: '2026-11-24T12:00:00.000Z',
+      total: 2,
+      unblocked_ips_alerts: 0,
+    });
   });
 
   it('adds a before/after summary only for recheck requests', async () => {
