@@ -1,4 +1,9 @@
-import { CLIENT_SECURITY_CATEGORIES, IGNORED_SIGNATURE_KEYS } from '../analysis/newEntity.js';
+import type { Finding } from '../analysis/findings.js';
+import {
+  CLIENT_SECURITY_CATEGORIES,
+  IGNORED_SIGNATURE_KEYS,
+  splitSignatureKey,
+} from '../analysis/newEntity.js';
 import type { SinkDb } from './sinkDb.js';
 
 export interface StoredEvent {
@@ -212,6 +217,109 @@ export function auditCandidateEvents(
     .all(sourceIp, sinceIso) as unknown as { category: string; message: string | null }[];
 }
 
+// Entity-scoped WHERE fragment for the IP and signature entity types. Client
+// entities never come through here: their predicate references client columns,
+// so it lives in the client-only section below.
+function entityWhere(
+  entityType: 'signature' | 'source_ip',
+  entityKey: string
+): { sql: string; params: string[] } {
+  if (entityType === 'source_ip') return { sql: 'source_ip = ?', params: [entityKey] };
+  const { category, signature } = splitSignatureKey(entityKey);
+  return { sql: 'category = ? AND signature = ?', params: [category, signature] };
+}
+
+const UNBLOCKED_IPS_SQL = "category = 'ips_alert' AND (action IS NULL OR action != 'blocked')";
+
+function countWhere(db: SinkDb, whereSql: string, params: (string | number)[]): number {
+  return (
+    db.conn.prepare(`SELECT COUNT(*) AS n FROM events WHERE ${whereSql}`).get(...params) as {
+      n: number;
+    }
+  ).n;
+}
+
+// IPS alerts for the entity since sinceIso that the gateway did not block. A
+// NULL action counts as not blocked: absence of proof isn't proof.
+export function countUnblockedIpsAlerts(
+  db: SinkDb,
+  entityType: Finding['entity_type'],
+  entityKey: string,
+  sinceIso: string
+): number {
+  if (entityType === 'client') return clientUnblockedIpsAlertCount(db, entityKey, sinceIso);
+  const where = entityWhere(entityType, entityKey);
+  return countWhere(db, `${where.sql} AND received_at >= ? AND ${UNBLOCKED_IPS_SQL}`, [
+    ...where.params,
+    sinceIso,
+  ]);
+}
+
+export interface ActivitySummary {
+  total: number;
+  by_action: Record<string, number>;
+  top_dest_ports: { value: number; count: number }[];
+  top_dest_ips: { value: string; count: number }[];
+  top_counterparts: { value: string; count: number }[];
+}
+
+const SUMMARY_TOP_N = 5;
+
+// Aggregate shape of an entity's events in [sinceIso, untilIso). Generic over
+// the WHERE fragment so the client variant can reuse it without this section
+// naming any client column. NULL action is reported as "unknown".
+function summarizeWhere(
+  db: SinkDb,
+  where: { sql: string; params: (string | number)[] },
+  counterpartColumn: 'signature' | 'source_ip',
+  sinceIso: string,
+  untilIso?: string
+): ActivitySummary {
+  const windowSql = untilIso ? 'received_at >= ? AND received_at < ?' : 'received_at >= ?';
+  const baseSql = `${where.sql} AND ${windowSql}`;
+  const params = [...where.params, sinceIso, ...(untilIso ? [untilIso] : [])];
+  const top = <T>(column: string): { value: T; count: number }[] =>
+    db.conn
+      .prepare(
+        `SELECT ${column} AS value, COUNT(*) AS count FROM events
+         WHERE ${baseSql} AND ${column} IS NOT NULL AND ${column} != ''
+         GROUP BY ${column} ORDER BY count DESC, value ASC LIMIT ?`
+      )
+      .all(...params, SUMMARY_TOP_N) as unknown as { value: T; count: number }[];
+  const actions = db.conn
+    .prepare(
+      `SELECT COALESCE(action, 'unknown') AS action, COUNT(*) AS count FROM events
+       WHERE ${baseSql} GROUP BY COALESCE(action, 'unknown')`
+    )
+    .all(...params) as { action: string; count: number }[];
+  return {
+    total: countWhere(db, baseSql, params),
+    by_action: Object.fromEntries(actions.map((a) => [a.action, a.count])),
+    top_dest_ports: top<number>('dest_port'),
+    top_dest_ips: top<string>('dest_ip'),
+    top_counterparts: top<string>(counterpartColumn),
+  };
+}
+
+// Counterparts are the "other side" of the entity: signatures a source IP (or
+// client) tripped, or source IPs that tripped a signature.
+export function entityActivitySummary(
+  db: SinkDb,
+  entityType: Finding['entity_type'],
+  entityKey: string,
+  sinceIso: string,
+  untilIso?: string
+): ActivitySummary {
+  if (entityType === 'client') return clientActivitySummary(db, entityKey, sinceIso, untilIso);
+  return summarizeWhere(
+    db,
+    entityWhere(entityType, entityKey),
+    entityType === 'source_ip' ? 'signature' : 'source_ip',
+    sinceIso,
+    untilIso
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Client-only queries (sink >= v1.0.3). These are the ONLY queries that may
 // reference the source_client_* / dest_client_* columns: every existing query
@@ -314,4 +422,26 @@ export function eventsForClientMac(db: SinkDb, mac: string, limit = 20): ClientS
        FROM events WHERE source_client_mac = ? AND ${where.sql} ORDER BY received_at DESC LIMIT ?`
     )
     .all(mac, ...where.params, limit) as unknown as ClientStoredEvent[];
+}
+
+function clientWhere(mac: string): { sql: string; params: string[] } {
+  const where = clientOnlyWhere();
+  return { sql: `source_client_mac = ? AND ${where.sql}`, params: [mac, ...where.params] };
+}
+
+export function clientUnblockedIpsAlertCount(db: SinkDb, mac: string, sinceIso: string): number {
+  const where = clientWhere(mac);
+  return countWhere(db, `${where.sql} AND received_at >= ? AND ${UNBLOCKED_IPS_SQL}`, [
+    ...where.params,
+    sinceIso,
+  ]);
+}
+
+export function clientActivitySummary(
+  db: SinkDb,
+  mac: string,
+  sinceIso: string,
+  untilIso?: string
+): ActivitySummary {
+  return summarizeWhere(db, clientWhere(mac), 'signature', sinceIso, untilIso);
 }

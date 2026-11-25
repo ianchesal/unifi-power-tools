@@ -94,7 +94,7 @@ export function createApp(
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
     const mcpServer = new McpServer({ name: 'unifi-siem-lens', version: '0.1.0' });
-    registerAnalysisTools(mcpServer, lensDb);
+    registerAnalysisTools(mcpServer, { lensDb, sinkDb, unifiMcp, homelabServices });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
       transport.close();

@@ -3,12 +3,15 @@ import {
   cancelPendingRequests,
   createAnalysisRequest,
   createAnsweredRuleAnalysis,
+  getPendingRequestOrThrow,
+  recordAiVerdict,
 } from '../db/analysisRequestsStore.js';
 import { addHistory } from '../db/findingHistoryStore.js';
 import { type FindingStatePatch, getFindingById, updateFindingState } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import { assertTransition, type Finding, FindingNotFoundError } from './findings.js';
 import type { RuleMatch } from './matchRules.js';
+import { type AiVerdictInput, type VerdictContext, validateAiVerdict } from './verdict.js';
 
 // The single place finding status transitions happen. Every function asserts the
 // transition is legal, updates the finding, cancels any pending analysis request
@@ -252,5 +255,55 @@ export function reanalyze(db: LensDb, findingId: number, nowIso: string): Findin
       analysis_request_id: req.id,
     });
     return updated;
+  });
+}
+
+export class VerdictRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VerdictRejectedError';
+  }
+}
+
+// The only way a finding leaves `triaging` on an AI decision. Checks run before
+// any write, so a rejected verdict leaves the request pending for a retry.
+export function applyAiVerdict(
+  db: LensDb,
+  requestId: number,
+  input: AiVerdictInput,
+  ctx: Omit<VerdictContext, 'isRecheck'>,
+  nowIso: string
+): { request: AnalysisRequestRow; finding: Finding } {
+  return atomically(db, () => {
+    const pending = getPendingRequestOrThrow(db, requestId);
+    const finding = loadFinding(db, pending.finding_id);
+    assertTransition('submit_analysis', finding);
+    const rejection = validateAiVerdict(input, { ...ctx, isRecheck: pending.is_recheck === 1 });
+    if (rejection) throw new VerdictRejectedError(rejection);
+
+    const request = recordAiVerdict(db, requestId, input, nowIso);
+    const close = input.verdict === 'close';
+    const updated = apply(
+      db,
+      finding,
+      close
+        ? {
+            status: 'closed',
+            closed_by: 'ai',
+            closed_reason: input.summary,
+            closed_at: nowIso,
+            last_triaged_at: nowIso,
+          }
+        : { status: 'attention', last_triaged_at: nowIso }
+    );
+    addHistory(db, {
+      finding_id: finding.id as number,
+      at: nowIso,
+      kind: close ? 'ai_closed' : 'ai_attention',
+      actor: 'ai',
+      summary: input.summary,
+      analysis_request_id: requestId,
+    });
+    return { request, finding: updated };
   });
 }

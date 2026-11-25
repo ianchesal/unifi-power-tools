@@ -106,12 +106,8 @@ export interface AiVerdictFields {
   cited_entries?: number[];
 }
 
-export function recordAiVerdict(
-  db: LensDb,
-  id: number,
-  v: AiVerdictFields,
-  nowIso: string
-): AnalysisRequestRow {
+// Throws the caller-facing message for a request that can't take a verdict.
+export function getPendingRequestOrThrow(db: LensDb, id: number): AnalysisRequestRow {
   const existing = getAnalysisRequest(db, id);
   if (!existing) throw new Error(`Analysis request ${id} not found`);
   if (existing.status === 'answered') {
@@ -120,6 +116,16 @@ export function recordAiVerdict(
   if (existing.status === 'cancelled') {
     throw new Error(`Analysis request ${id} was cancelled (its finding left triaging); skip it`);
   }
+  return existing;
+}
+
+export function recordAiVerdict(
+  db: LensDb,
+  id: number,
+  v: AiVerdictFields,
+  nowIso: string
+): AnalysisRequestRow {
+  getPendingRequestOrThrow(db, id);
   db.conn
     .prepare(
       `UPDATE analysis_requests SET status = 'answered', verdict = ?, risk_level = ?, summary = ?,

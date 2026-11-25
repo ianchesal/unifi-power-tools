@@ -3,6 +3,7 @@ import { applyTrigger, FindingNotFoundError, TransitionError } from '../../src/a
 import type { Finding } from '../../src/analysis/findings.js';
 import type { RuleMatch } from '../../src/analysis/matchRules.js';
 import {
+  applyAiVerdict,
   atomically,
   closeByRule,
   humanClose,
@@ -12,6 +13,7 @@ import {
   recheckRequeue,
   recheckStillClosed,
   recordCreated,
+  VerdictRejectedError,
 } from '../../src/analysis/pipeline.js';
 import {
   createAnalysisRequest,
@@ -296,6 +298,124 @@ describe('pipeline', () => {
     });
     expect(getFindingById(db, a.id as number)?.status).toBe('closed');
     expect(getFindingById(db, b.id as number)?.status).toBe('attention');
+    db.close();
+  });
+});
+
+describe('applyAiVerdict', () => {
+  const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<number>() };
+  const close = { verdict: 'close', risk_level: 'low', summary: 'benign scanner', reasoning: 'all blocked' } as const;
+
+  it('applyAiVerdict close → closed by ai with summary as reason and an ai_closed history row', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    const { request, finding } = applyAiVerdict(db, req.id, close, okCtx, 't2');
+    expect(finding).toMatchObject({
+      status: 'closed',
+      closed_by: 'ai',
+      closed_reason: 'benign scanner',
+      closed_at: 't2',
+      last_triaged_at: 't2',
+    });
+    expect(request).toMatchObject({
+      status: 'answered',
+      verdict: 'close',
+      risk_level: 'low',
+      summary: 'benign scanner',
+      recommendation: 'all blocked',
+      answered_at: 't2',
+    });
+    expect(getFindingById(db, f.id as number)?.status).toBe('closed');
+    expect(listHistory(db, f.id as number).at(-1)).toMatchObject({
+      kind: 'ai_closed',
+      actor: 'ai',
+      at: 't2',
+      summary: 'benign scanner',
+      analysis_request_id: req.id,
+    });
+    db.close();
+  });
+
+  it('applyAiVerdict attention → attention with ai_attention history', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    const { request, finding } = applyAiVerdict(
+      db,
+      req.id,
+      { ...close, verdict: 'attention', risk_level: 'high', summary: 'looks like C2', recommended_action: 'isolate host' },
+      { ...okCtx, unblockedIpsAlertsSinceDecision: null },
+      't2'
+    );
+    expect(finding).toMatchObject({
+      status: 'attention',
+      closed_by: null,
+      closed_at: null,
+      last_triaged_at: 't2',
+    });
+    expect(request).toMatchObject({ verdict: 'attention', recommended_action: 'isolate host' });
+    expect(listHistory(db, f.id as number).at(-1)).toMatchObject({
+      kind: 'ai_attention',
+      actor: 'ai',
+      summary: 'looks like C2',
+      analysis_request_id: req.id,
+    });
+    db.close();
+  });
+
+  it('applyAiVerdict on a cancelled request throws the skip message', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    closeByRule(db, f, match('operational_noise'), 't2');
+    expect(() => applyAiVerdict(db, req.id, close, okCtx, 't3')).toThrow(/cancelled.*skip it/);
+    expect(() => applyAiVerdict(db, 999, close, okCtx, 't3')).toThrow(/999 not found/);
+    db.close();
+  });
+
+  it('applyAiVerdict on an already answered request throws', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    applyAiVerdict(db, req.id, close, okCtx, 't2');
+    expect(() => applyAiVerdict(db, req.id, close, okCtx, 't3')).toThrow(/already answered/);
+    db.close();
+  });
+
+  it('applyAiVerdict when the finding is no longer triaging throws TransitionError', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    // Bypass the pipeline so the request stays pending while the finding moves on.
+    updateFindingState(db, f.id as number, { status: 'attention' });
+    expect(() => applyAiVerdict(db, req.id, close, okCtx, 't2')).toThrow(TransitionError);
+    expect(getAnalysisRequest(db, req.id)?.status).toBe('pending');
+    db.close();
+  });
+
+  it('applyAiVerdict rejected by guardrail leaves request pending and finding triaging', () => {
+    const db = openLensDb(':memory:');
+    const f = triagingFinding(db);
+    const req = queueForAnalysis(db, f, 't1');
+    const historyBefore = listHistory(db, f.id as number);
+    expect(() =>
+      applyAiVerdict(db, req.id, close, { ...okCtx, unblockedIpsAlertsSinceDecision: 3 }, 't2')
+    ).toThrow(VerdictRejectedError);
+    expect(getAnalysisRequest(db, req.id)?.status).toBe('pending');
+    expect(getFindingById(db, f.id as number)?.status).toBe('triaging');
+    expect(listHistory(db, f.id as number)).toEqual(historyBefore);
+    db.close();
+  });
+
+  it('applyAiVerdict on a recheck request requires why_now', () => {
+    const db = openLensDb(':memory:');
+    const f = closedFinding(db);
+    recheckRequeue(db, f, 't1');
+    const req = getPendingRequestForFinding(db, f.id as number);
+    expect(() => applyAiVerdict(db, req?.id as number, close, okCtx, 't2')).toThrow(/why_now/);
+    const out = applyAiVerdict(db, req?.id as number, { ...close, why_now: 'same scanner again' }, okCtx, 't2');
+    expect(out.request.why_now).toBe('same scanner again');
     db.close();
   });
 });

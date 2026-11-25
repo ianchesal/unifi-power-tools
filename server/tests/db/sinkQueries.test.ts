@@ -6,6 +6,8 @@ import {
   auditCandidateEvents,
   clientDayCounts,
   clientMacsSince,
+  countUnblockedIpsAlerts,
+  entityActivitySummary,
   eventsForClientMac,
   eventsForSignature,
   eventsForSourceIp,
@@ -18,6 +20,7 @@ import {
   topSignatures,
   topSourceIps,
 } from '../../src/db/sinkQueries.js';
+import { seededSinkDb } from '../helpers.js';
 
 function seededEventsDb(
   rows: {
@@ -245,5 +248,99 @@ describe('client queries', () => {
     const events = eventsForClientMac(clientDb(), 'aa:aa:aa:aa:aa:01');
     expect(events).toHaveLength(2);
     expect(events[0].source_client_name).toBe('tranq-renamed');
+  });
+});
+
+describe('countUnblockedIpsAlerts / entityActivitySummary', () => {
+  const MAC = 'aa:aa:aa:aa:aa:01';
+  function activityDb(): SinkDb {
+    return seededSinkDb([
+      // source IP 198.51.100.4: two unblocked (one NULL action), one blocked, one non-IPS
+      { received_at: '2026-11-20T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.4', action: 'blocked', dest_ip: '192.168.1.10', dest_port: 22 },
+      { received_at: '2026-11-20T02:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.4', action: 'allowed', dest_ip: '192.168.1.10', dest_port: 22 },
+      { received_at: '2026-11-20T03:00:00Z', category: 'ips_alert', signature: 'ET SCAN B', source_ip: '198.51.100.4', action: null, dest_ip: '192.168.1.11', dest_port: 443 },
+      { received_at: '2026-11-20T04:00:00Z', category: 'firewall_block', signature: 'fw', source_ip: '198.51.100.4', action: 'allowed', dest_ip: '192.168.1.10', dest_port: 22 },
+      // before the window
+      { received_at: '2026-11-10T00:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.4', action: 'allowed' },
+      // another source for the same signature
+      { received_at: '2026-11-20T05:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.9', action: 'blocked', dest_ip: '192.168.1.10', dest_port: 22 },
+      // client-only events
+      { received_at: '2026-11-20T06:00:00Z', category: 'ips_alert', signature: 'ET C2', source_client_mac: MAC, action: 'allowed', dest_ip: '203.0.113.50', dest_port: 8443 },
+      { received_at: '2026-11-20T07:00:00Z', category: 'ips_alert', signature: 'ET C2', source_client_mac: MAC, action: 'blocked', dest_ip: '203.0.113.50', dest_port: 8443 },
+      // same MAC but with an IP: not client-only
+      { received_at: '2026-11-20T08:00:00Z', category: 'ips_alert', signature: 'ET C2', source_ip: '192.168.1.26', source_client_mac: MAC, action: 'allowed' },
+    ]);
+  }
+  const SINCE = '2026-11-15T00:00:00Z';
+
+  it('counts unblocked IPS alerts per entity type, NULL action counting as unblocked', () => {
+    const db = activityDb();
+    expect(countUnblockedIpsAlerts(db, 'source_ip', '198.51.100.4', SINCE)).toBe(2);
+    expect(countUnblockedIpsAlerts(db, 'signature', 'ips_alert|ET SCAN A', SINCE)).toBe(1);
+    expect(countUnblockedIpsAlerts(db, 'signature', 'firewall_block|fw', SINCE)).toBe(0);
+    expect(countUnblockedIpsAlerts(db, 'client', MAC, SINCE)).toBe(1);
+    expect(countUnblockedIpsAlerts(db, 'source_ip', '198.51.100.4', '2026-11-01T00:00:00Z')).toBe(3);
+  });
+
+  it('summarises a source IP: actions, ports, dest IPs and signatures as counterparts', () => {
+    const s = entityActivitySummary(activityDb(), 'source_ip', '198.51.100.4', SINCE);
+    expect(s.total).toBe(4);
+    expect(s.by_action).toEqual({ blocked: 1, allowed: 2, unknown: 1 });
+    expect(s.top_dest_ports).toEqual([
+      { value: 22, count: 3 },
+      { value: 443, count: 1 },
+    ]);
+    expect(s.top_dest_ips[0]).toEqual({ value: '192.168.1.10', count: 3 });
+    expect(s.top_counterparts).toEqual([
+      { value: 'ET SCAN A', count: 2 },
+      { value: 'ET SCAN B', count: 1 },
+      { value: 'fw', count: 1 },
+    ]);
+  });
+
+  it('summarises a signature with source IPs as counterparts and honours untilIso', () => {
+    const db = activityDb();
+    const s = entityActivitySummary(db, 'signature', 'ips_alert|ET SCAN A', SINCE);
+    expect(s.total).toBe(3);
+    expect(s.top_counterparts).toEqual([
+      { value: '198.51.100.4', count: 2 },
+      { value: '198.51.100.9', count: 1 },
+    ]);
+    const bounded = entityActivitySummary(db, 'signature', 'ips_alert|ET SCAN A', SINCE, '2026-11-20T01:30:00Z');
+    expect(bounded.total).toBe(1);
+  });
+
+  it('summarises client-only events for a MAC', () => {
+    const s = entityActivitySummary(activityDb(), 'client', MAC, SINCE);
+    expect(s.total).toBe(2);
+    expect(s.top_dest_ports).toEqual([{ value: 8443, count: 2 }]);
+    expect(s.top_counterparts).toEqual([{ value: 'ET C2', count: 2 }]);
+  });
+
+  it('caps each top list at 5', () => {
+    const db = seededSinkDb(
+      Array.from({ length: 8 }, (_, i) => ({
+        received_at: '2026-11-20T00:00:00Z',
+        category: 'ips_alert',
+        signature: `sig-${i}`,
+        source_ip: '198.51.100.4',
+        dest_port: 1000 + i,
+        dest_ip: `192.168.1.${i + 1}`,
+      }))
+    );
+    const s = entityActivitySummary(db, 'source_ip', '198.51.100.4', SINCE);
+    expect(s.top_dest_ports).toHaveLength(5);
+    expect(s.top_dest_ips).toHaveLength(5);
+    expect(s.top_counterparts).toHaveLength(5);
+  });
+
+  it('client variants throw on a pre-v1.0.3 sink (no client columns); IP/signature variants do not', () => {
+    const old = seededEventsDb([
+      { received_at: '2026-11-20T00:00:00Z', category: 'ips_alert', signature: 'x', source_ip: '198.51.100.4', action: 'allowed' },
+    ]);
+    expect(() => countUnblockedIpsAlerts(old, 'client', MAC, SINCE)).toThrow();
+    expect(() => entityActivitySummary(old, 'client', MAC, SINCE)).toThrow();
+    expect(countUnblockedIpsAlerts(old, 'source_ip', '198.51.100.4', SINCE)).toBe(1);
+    expect(entityActivitySummary(old, 'source_ip', '198.51.100.4', SINCE).total).toBe(1);
   });
 });
