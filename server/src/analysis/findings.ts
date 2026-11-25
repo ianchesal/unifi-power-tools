@@ -6,9 +6,10 @@ export type TriggerType =
   | 'new_client'
   | 'internal_source';
 
-// Only these two triggers represent an ongoing condition that can revert —
-// see spec "Auto-resolve": a first-seen event (signature, IP or client) or an IP's internal-ness
-// can't "un-happen", so those trigger types always require manual dismissal.
+// Only these two triggers represent an ongoing condition that can lift; a
+// first-seen event (signature, IP or client) or an IP's internal-ness can't
+// "un-happen". Lifting only flips `active` (and the severity score) — it never
+// changes a finding's status.
 export const STANDING_TRIGGER_TYPES: TriggerType[] = ['anomaly', 'repeat_offender'];
 
 export interface Trigger {
@@ -18,7 +19,8 @@ export interface Trigger {
   active: boolean;
 }
 
-export type FindingStatus = 'new' | 'acknowledged' | 'dismissed' | 'resolved';
+export type FindingStatus = 'triaging' | 'attention' | 'closed';
+export type ClosedBy = 'rule' | 'ai' | 'human' | 'system';
 
 export interface Finding {
   id?: number;
@@ -29,6 +31,12 @@ export interface Finding {
   triggers: Trigger[];
   severity_score: number;
   status: FindingStatus;
+  closed_by: ClosedBy | null;
+  closed_reason: string | null;
+  closed_at: string | null;
+  last_activity_at: string;
+  last_triaged_at: string | null;
+  reopen_count: number;
 }
 
 const TRIGGER_WEIGHTS: Record<TriggerType, number> = {
@@ -60,7 +68,13 @@ export function applyTrigger(
       last_seen: now,
       triggers,
       severity_score: computeSeverityScore(triggers),
-      status: 'new',
+      status: 'triaging',
+      closed_by: null,
+      closed_reason: null,
+      closed_at: null,
+      last_activity_at: now,
+      last_triaged_at: null,
+      reopen_count: 0,
     };
   }
 
@@ -69,23 +83,23 @@ export function applyTrigger(
     ? existing.triggers.map((t) => (t.type === type ? { ...t, active: true, last_seen: now } : t))
     : [...existing.triggers, { type, first_seen: now, last_seen: now, active: true }];
 
-  // Rule 5 (refresh preserves status) has a narrow exception: a resolved
-  // finding is machine-set on the premise "all triggers currently inactive."
-  // If a standing trigger the finding already carries reactivates, that
-  // premise no longer holds, so the finding must reopen rather than stay
-  // silently resolved with a nonzero severity score.
-  const status: FindingStatus = hasType
-    ? existing.status === 'resolved'
-      ? 'new'
-      : existing.status
-    : 'new';
+  // Status is untouched, with one exception: a rule-closed finding that gains
+  // internal_source goes back to triaging. Being on the LAN voids the "noise"
+  // verdict a rule reached without that context.
+  const reopenForInternal =
+    !hasType &&
+    type === 'internal_source' &&
+    existing.status === 'closed' &&
+    existing.closed_by === 'rule';
 
   return {
     ...existing,
     last_seen: now,
     triggers,
     severity_score: computeSeverityScore(triggers),
-    status,
+    ...(reopenForInternal
+      ? { status: 'triaging' as const, closed_by: null, closed_reason: null, closed_at: null }
+      : {}),
   };
 }
 
@@ -103,22 +117,73 @@ export function reevaluateTrigger(
     t.type === type ? { ...t, active, last_seen: active ? now : t.last_seen } : t
   );
 
-  const allStandingAndInactive =
-    triggers.every((t) => STANDING_TRIGGER_TYPES.includes(t.type)) &&
-    triggers.every((t) => !t.active);
-
-  const status: FindingStatus =
-    !active &&
-    allStandingAndInactive &&
-    (finding.status === 'new' || finding.status === 'acknowledged')
-      ? 'resolved'
-      : finding.status;
-
   return {
     ...finding,
     triggers,
     severity_score: computeSeverityScore(triggers),
-    status,
     last_seen: active ? now : finding.last_seen,
   };
+}
+
+export type TransitionAction =
+  | 'rule_close'
+  | 'submit_analysis'
+  | 'recheck'
+  | 'human_close'
+  | 'human_reopen'
+  | 'reanalyze';
+
+export class TransitionError extends Error {
+  constructor(
+    public readonly action: TransitionAction,
+    public readonly from: FindingStatus
+  ) {
+    super(`Cannot ${action} a finding that is ${from}`);
+    this.name = 'TransitionError';
+  }
+}
+
+export class FindingNotFoundError extends Error {
+  constructor(message = 'Finding not found') {
+    super(message);
+    this.name = 'FindingNotFoundError';
+  }
+}
+
+const ALLOWED: Record<TransitionAction, (f: Finding) => boolean> = {
+  rule_close: (f) => f.status === 'triaging',
+  submit_analysis: (f) => f.status === 'triaging',
+  recheck: (f) => f.status === 'closed',
+  human_close: (f) => f.status === 'attention',
+  human_reopen: (f) => f.status === 'closed',
+  reanalyze: (f) => f.status === 'closed' || f.status === 'attention',
+};
+
+export function assertTransition(action: TransitionAction, finding: Finding): void {
+  if (!ALLOWED[action](finding)) throw new TransitionError(action, finding.status);
+}
+
+// Repeat-offender is the widest creation window (14 days), so a never-decided
+// finding's evidence can reach back that far before first_seen.
+export const NEVER_DECIDED_LOOKBACK_DAYS = 14;
+export const RECHECK_MIN_INTERVAL_HOURS = 24;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function decisionWindowStart(finding: Finding): string {
+  return (
+    finding.last_triaged_at ??
+    finding.closed_at ??
+    new Date(Date.parse(finding.first_seen) - NEVER_DECIDED_LOOKBACK_DAYS * DAY_MS).toISOString()
+  );
+}
+
+export function isRecheckDue(finding: Finding, nowIso: string): boolean {
+  if (finding.status !== 'closed') return false;
+  const anchor = finding.last_triaged_at ?? finding.closed_at;
+  if (anchor === null) return false;
+  return (
+    finding.last_activity_at > anchor &&
+    Date.parse(anchor) < Date.parse(nowIso) - RECHECK_MIN_INTERVAL_HOURS * 60 * 60 * 1000
+  );
 }
