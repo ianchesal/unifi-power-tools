@@ -79,9 +79,9 @@ This skill only drains the **pending MCP queue**
      concrete thing to do in UniFi.
    - **`close`** — nothing for the operator to do. Already-blocked noise
      with no new risk is a close, however many alerts there are.
-   When unsure whether it's worth the operator's time, prefer `attention`
-   with an honest `risk_level`; a wrongly-closed finding is hidden, a
-   wrongly-flagged one costs a click.
+   When unsure, prefer `attention` (with an honest `risk_level`) only when
+   something was not blocked or the host is internal; already-blocked
+   activity from an external source is a close.
 
 6. **Cross-reference other pending findings.** If two or more pending
    findings clearly share a root cause (same source IP, same signature,

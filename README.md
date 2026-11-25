@@ -107,10 +107,10 @@ next to the finding.
 
 | Surface | What it gives you |
 |---|---|
-| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip, events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern, Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; Reopen or Re-analyze). |
+| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip, events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). |
 | Admin (`/admin`) | One-off maintenance actions — currently just the rule-triage backfill (see below). |
 | `GET /health` | Liveness + sink DB / schema-contract status. |
-| `GET /api/findings` | List findings. `view=open\|attention\|triaging\|closed\|all` (default `open`), optional `closed_by`, `q`, and `limit`/`offset` (paginated as `{ items, total }`). Each item carries its latest answered analysis. |
+| `GET /api/findings` | List findings. `view=open\|attention\|triaging\|closed\|all` (default `open`), optional `closed_by`, `q`, and `limit`/`offset` (paginated as `{ items, total }`). Each item carries its latest answered analysis and the note of its latest reopen (`latest_reopen_note`). |
 | `GET /api/findings-summary` | Counts for the KPI tiles: `{ attention, triaging, closed_last_7d }`. |
 | `GET /api/findings/:id/history` | A finding's audit trail (created, rule/AI/human decisions, rechecks, reopens). |
 | `GET /api/findings/:id/activity` | The raw sink events behind a finding. |
