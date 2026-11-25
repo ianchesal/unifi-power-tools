@@ -29,24 +29,24 @@ function seed(
 describe('findingsStore', () => {
   it('round-trips a finding through upsert/get, preserving triggers', () => {
     const db = openLensDb(':memory:');
-    const finding = applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4');
+    const finding = applyTrigger(null, 'internal_source', 't0', 'source_ip', '192.0.2.4');
     const saved = upsertFinding(db, finding);
     expect(saved.id).toBeDefined();
 
-    const fetched = getFinding(db, 'source_ip', '1.2.3.4');
+    const fetched = getFinding(db, 'source_ip', '192.0.2.4');
     expect(fetched?.triggers).toEqual(finding.triggers);
     expect(fetched?.status).toBe('triaging');
     expect(fetched?.last_activity_at).toBe('t0');
     expect(fetched?.reopen_count).toBe(0);
-    expect(getFindingById(db, saved.id as number)?.entity_key).toBe('1.2.3.4');
+    expect(getFindingById(db, saved.id as number)?.entity_key).toBe('192.0.2.4');
     expect(getFindingById(db, 999)).toBeNull();
     db.close();
   });
 
   it('upsert on the same entity updates the same row (no duplicate)', () => {
     const db = openLensDb(':memory:');
-    const f1 = upsertFinding(db, applyTrigger(null, 'internal_source', 't0', 'source_ip', '9.9.9.9'));
-    const f2 = upsertFinding(db, applyTrigger(f1, 'repeat_offender', 't1', 'source_ip', '9.9.9.9'));
+    const f1 = upsertFinding(db, applyTrigger(null, 'internal_source', 't0', 'source_ip', '198.51.100.9'));
+    const f2 = upsertFinding(db, applyTrigger(f1, 'repeat_offender', 't1', 'source_ip', '198.51.100.9'));
     expect(f2.id).toBe(f1.id);
     expect(listFindings(db).length).toBe(1);
     db.close();
@@ -54,7 +54,7 @@ describe('findingsStore', () => {
 
   it('upsert persists closed fields and status changes', () => {
     const db = openLensDb(':memory:');
-    const f = seed(db, '9.9.9.9');
+    const f = seed(db, '198.51.100.9');
     const saved = upsertFinding(db, {
       ...f,
       status: 'closed',
@@ -73,15 +73,15 @@ describe('findingsStore', () => {
 
   it('tracks seen source IPs', () => {
     const db = openLensDb(':memory:');
-    expect(hasSeenSourceIp(db, '1.1.1.1')).toBe(false);
-    markSeenSourceIp(db, '1.1.1.1', 't0');
-    expect(hasSeenSourceIp(db, '1.1.1.1')).toBe(true);
+    expect(hasSeenSourceIp(db, '192.0.2.100')).toBe(false);
+    markSeenSourceIp(db, '192.0.2.100', 't0');
+    expect(hasSeenSourceIp(db, '192.0.2.100')).toBe(true);
     db.close();
   });
 
   it('updateFindingState patches only the given fields and returns the finding', () => {
     const db = openLensDb(':memory:');
-    const f = seed(db, '9.9.9.9');
+    const f = seed(db, '198.51.100.9');
     const updated = updateFindingState(db, f.id as number, {
       status: 'closed',
       closed_by: 'human',
@@ -171,8 +171,8 @@ describe('findingsStore', () => {
 
   it('upsertFinding does not overwrite last_activity_at, last_triaged_at or reopen_count', () => {
     const db = openLensDb(':memory:');
-    const f = seed(db, '9.9.9.9');
-    bumpLastActivity(db, 'source_ip', '9.9.9.9', 't9');
+    const f = seed(db, '198.51.100.9');
+    bumpLastActivity(db, 'source_ip', '198.51.100.9', 't9');
     updateFindingState(db, f.id as number, { last_triaged_at: 't8', reopen_count: 2 });
     const again = upsertFinding(db, { ...f, last_seen: 't10' });
     expect(again).toMatchObject({
@@ -186,11 +186,11 @@ describe('findingsStore', () => {
 
   it('bumpLastActivity only moves forward', () => {
     const db = openLensDb(':memory:');
-    seed(db, '9.9.9.9');
-    bumpLastActivity(db, 'source_ip', '9.9.9.9', 't5');
-    expect(getFinding(db, 'source_ip', '9.9.9.9')?.last_activity_at).toBe('t5');
-    bumpLastActivity(db, 'source_ip', '9.9.9.9', 't3');
-    expect(getFinding(db, 'source_ip', '9.9.9.9')?.last_activity_at).toBe('t5');
+    seed(db, '198.51.100.9');
+    bumpLastActivity(db, 'source_ip', '198.51.100.9', 't5');
+    expect(getFinding(db, 'source_ip', '198.51.100.9')?.last_activity_at).toBe('t5');
+    bumpLastActivity(db, 'source_ip', '198.51.100.9', 't3');
+    expect(getFinding(db, 'source_ip', '198.51.100.9')?.last_activity_at).toBe('t5');
     db.close();
   });
 

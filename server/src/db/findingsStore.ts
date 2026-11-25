@@ -146,9 +146,7 @@ function findingsWhereClause(opts: FindingsFilter): { where: string; params: str
   }
   if (opts.q) {
     const like = `%${opts.q.replace(/[\\%_]/g, '\\$&')}%`;
-    clauses.push(
-      "(entity_key LIKE ? ESCAPE '\\' COLLATE NOCASE OR closed_reason LIKE ? ESCAPE '\\' COLLATE NOCASE)"
-    );
+    clauses.push("(entity_key LIKE ? ESCAPE '\\' OR closed_reason LIKE ? ESCAPE '\\')");
     params.push(like, like);
   }
   return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
@@ -160,7 +158,9 @@ export function listFindings(
 ): Finding[] {
   const { where, params } = findingsWhereClause(opts);
   const order =
-    opts.view === 'closed' ? 'closed_at DESC, id DESC' : 'severity_score DESC, first_seen ASC';
+    opts.view === 'closed'
+      ? 'closed_at DESC, id DESC'
+      : 'severity_score DESC, first_seen ASC, id ASC';
   const pagination = opts.limit !== undefined ? ' LIMIT ? OFFSET ?' : '';
   const rows = db.conn
     .prepare(`SELECT * FROM findings ${where} ORDER BY ${order}${pagination}`)

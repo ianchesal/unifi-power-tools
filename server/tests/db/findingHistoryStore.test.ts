@@ -7,7 +7,7 @@ import { openLensDb } from '../../src/db/lensDb.js';
 describe('findingHistoryStore', () => {
   it('appends and lists history in time order', () => {
     const db = openLensDb(':memory:');
-    const f = upsertFinding(db, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
+    const f = upsertFinding(db, applyTrigger(null, 'internal_source', 't0', 'source_ip', '192.0.2.4'));
     const id = f.id as number;
     const later = addHistory(db, { finding_id: id, at: 't2', kind: 'queued', actor: 'system', summary: 'queued' });
     const first = addHistory(db, {
