@@ -8,12 +8,18 @@ import {
 import { listFindings } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
 import type { SinkDb } from '../db/sinkDb.js';
-import { eventsForSignature, eventsForSourceIp, type StoredEvent } from '../db/sinkQueries.js';
+import {
+  eventsForClientMac,
+  eventsForSignature,
+  eventsForSourceIp,
+  type StoredEvent,
+} from '../db/sinkQueries.js';
 import {
   annotateHomelabDestinations,
   type HomelabRegistry,
 } from '../enrichment/homelabServices.js';
 import type { UnifiMcpClient } from '../enrichment/unifiMcpClient.js';
+import { withDisplayNames } from './findings.js';
 
 const RECENT_EVENTS_LIMIT = 20;
 const BASELINE_HISTORY_LIMIT = 14;
@@ -56,6 +62,8 @@ export function createAnalysisRequestsRouter(
     if (sinkDb) {
       if (finding.entity_type === 'source_ip') {
         recentEvents = eventsForSourceIp(sinkDb, finding.entity_key, RECENT_EVENTS_LIMIT);
+      } else if (finding.entity_type === 'client') {
+        recentEvents = eventsForClientMac(sinkDb, finding.entity_key, RECENT_EVENTS_LIMIT);
       } else {
         const { category, signature } = splitSignatureKey(finding.entity_key);
         recentEvents = eventsForSignature(sinkDb, category, signature, RECENT_EVENTS_LIMIT);
@@ -67,7 +75,7 @@ export function createAnalysisRequestsRouter(
       lensDb,
       findingId,
       {
-        finding,
+        finding: withDisplayNames(sinkDb, [finding])[0],
         knownClient,
         firewallSummary,
         recentEvents: annotateHomelabDestinations(recentEvents, homelabServices),

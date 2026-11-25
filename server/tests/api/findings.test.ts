@@ -164,3 +164,72 @@ describe('GET /api/findings/:id/activity', () => {
     expect(res.status).toBe(503);
   });
 });
+
+describe('findings API — client findings', () => {
+  const MAC = 'aa:aa:aa:aa:aa:01';
+  function clientSinkDb(rows: { mac: string; name: string | null; source_ip?: string | null; category?: string }[]): SinkDb {
+    const conn = new DatabaseSync(':memory:');
+    conn.exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
+  category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
+  dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
+  signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER,
+  source_client_name TEXT, source_client_mac TEXT, dest_client_name TEXT, dest_client_mac TEXT)`);
+    const stmt = conn.prepare(
+      `INSERT INTO events (received_at, category, signature, source_ip, source_client_mac, source_client_name, raw, parsed)
+       VALUES ('2026-11-25T00:00:00Z', ?, 'sig', ?, ?, ?, 'raw-line', 1)`
+    );
+    for (const r of rows) stmt.run(r.category ?? 'ips_alert', r.source_ip ?? null, r.mac, r.name);
+    return { conn };
+  }
+  function appWith(sinkDb: SinkDb | null) {
+    const lensDb = openLensDb(':memory:');
+    const client = upsertFinding(lensDb, applyTrigger(null, 'new_client', 't0', 'client', MAC));
+    upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createFindingsRouter(lensDb, sinkDb));
+    return { app, client };
+  }
+
+  it('attaches display_name to client findings in both response shapes', async () => {
+    const { app } = appWith(clientSinkDb([{ mac: MAC, name: 'tranquility' }]));
+
+    const bare = await request(app).get('/api/findings');
+    const clientItem = bare.body.find((f: { entity_type: string }) => f.entity_type === 'client');
+    const ipItem = bare.body.find((f: { entity_type: string }) => f.entity_type === 'source_ip');
+    expect(clientItem.display_name).toBe('tranquility');
+    expect(ipItem).not.toHaveProperty('display_name');
+
+    const paged = await request(app).get('/api/findings?limit=10');
+    const pagedClient = paged.body.items.find((f: { entity_type: string }) => f.entity_type === 'client');
+    expect(pagedClient.display_name).toBe('tranquility');
+  });
+
+  it('returns display_name null when the sink is unavailable', async () => {
+    const { app } = appWith(null);
+    const res = await request(app).get('/api/findings');
+    expect(res.status).toBe(200);
+    expect(res.body.find((f: { entity_type: string }) => f.entity_type === 'client').display_name).toBeNull();
+  });
+
+  it('returns display_name null when the name lookup fails (pre-v1.0.3 sink)', async () => {
+    const { app } = appWith(seededSinkDb([]));
+    const res = await request(app).get('/api/findings');
+    expect(res.status).toBe(200);
+    expect(res.body.find((f: { entity_type: string }) => f.entity_type === 'client').display_name).toBeNull();
+  });
+
+  it('GET /findings/:id/activity returns events for a client finding by MAC', async () => {
+    const { app, client } = appWith(
+      clientSinkDb([
+        { mac: MAC, name: 'tranquility' },
+        { mac: MAC, name: 'tranquility', category: 'firewall_block' },
+        { mac: 'aa:aa:aa:aa:aa:09', name: 'other' },
+      ])
+    );
+    const res = await request(app).get(`/api/findings/${client.id}/activity`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    for (const e of res.body) expect(e.source_client_mac).toBe(MAC);
+  });
+});
