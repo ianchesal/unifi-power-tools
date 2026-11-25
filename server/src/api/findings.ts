@@ -4,7 +4,7 @@ import type { ClosedBy, Finding } from '../analysis/findings.js';
 import { FindingNotFoundError, TransitionError } from '../analysis/findings.js';
 import { splitSignatureKey } from '../analysis/newEntity.js';
 import { humanClose, humanReopen, reanalyze } from '../analysis/pipeline.js';
-import { type AnalysisRequestRow, latestAnsweredAnalyses } from '../db/analysisRequestsStore.js';
+import { type AnalysisSummaryRow, latestAnsweredAnalyses } from '../db/analysisRequestsStore.js';
 import { listHistory } from '../db/findingHistoryStore.js';
 import {
   closedCountsSince,
@@ -32,7 +32,7 @@ const CloseBody = z.object({
 const ReopenBody = z.object({ note: z.string().trim().min(1, 'note is required') });
 
 export type FindingListItem = FindingWithDisplayName & {
-  latest_analysis: Omit<AnalysisRequestRow, 'context'> | null;
+  latest_analysis: AnalysisSummaryRow | null;
 };
 
 export type FindingWithDisplayName = Finding & { display_name?: string | null };
@@ -65,19 +65,14 @@ export function withDisplayNames(
 export function createFindingsRouter(lensDb: LensDb, sinkDb: SinkDb | null): Router {
   const router = Router();
 
-  // Attaches each finding's latest answered analysis (minus the bulky
-  // `context` bundle, which is for the MCP handoff, not the dashboard).
+  // Attaches each finding's latest answered analysis (the store already leaves
+  // out the bulky `context` bundle, which is for the MCP handoff only).
   function withAnalyses(findings: FindingWithDisplayName[]): FindingListItem[] {
     const latest = latestAnsweredAnalyses(
       lensDb,
       findings.map((f) => f.id as number)
     );
-    return findings.map((f) => {
-      const row = latest.get(f.id as number);
-      if (!row) return { ...f, latest_analysis: null };
-      const { context: _context, ...analysis } = row;
-      return { ...f, latest_analysis: analysis };
-    });
+    return findings.map((f) => ({ ...f, latest_analysis: latest.get(f.id as number) ?? null }));
   }
 
   router.get('/findings', (req, res) => {

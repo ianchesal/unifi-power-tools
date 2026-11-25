@@ -163,20 +163,33 @@ export function createAnsweredRuleAnalysis(
   return getAnalysisRequest(db, Number(result.lastInsertRowid)) as AnalysisRequestRow;
 }
 
+export type AnalysisSummaryRow = Omit<AnalysisRequestRow, 'context'>;
+
+// Every column except the bulky `context` bundle (for the MCP handoff only).
+const SUMMARY_COLUMNS = `id, finding_id, status, recommendation, risk_level, source, created_at,
+  answered_at, verdict, summary, recommended_action, why_now, cited_entries, is_recheck`;
+
+// The latest answered analysis per finding (by answered_at, then id), picked
+// in SQL so a finding with many answered rechecks costs one row.
 export function latestAnsweredAnalyses(
   db: LensDb,
   findingIds: number[]
-): Map<number, AnalysisRequestRow> {
-  const out = new Map<number, AnalysisRequestRow>();
+): Map<number, AnalysisSummaryRow> {
+  const out = new Map<number, AnalysisSummaryRow>();
   if (findingIds.length === 0) return out;
   const placeholders = findingIds.map(() => '?').join(', ');
   const rows = db.conn
     .prepare(
-      `SELECT * FROM analysis_requests WHERE status = 'answered' AND finding_id IN (${placeholders})
-       ORDER BY answered_at ASC, id ASC`
+      `SELECT ${SUMMARY_COLUMNS} FROM (
+         SELECT ${SUMMARY_COLUMNS}, ROW_NUMBER() OVER (
+           PARTITION BY finding_id ORDER BY answered_at DESC, id DESC
+         ) AS rn
+         FROM analysis_requests
+         WHERE status = 'answered' AND finding_id IN (${placeholders})
+       ) WHERE rn = 1`
     )
-    .all(...findingIds) as unknown as AnalysisRequestRow[];
-  for (const r of rows) out.set(r.finding_id, r); // ascending, so the latest wins
+    .all(...findingIds) as unknown as AnalysisSummaryRow[];
+  for (const r of rows) out.set(r.finding_id, r);
   return out;
 }
 

@@ -175,10 +175,15 @@ describe('analysisRequestsStore', () => {
     createAnalysisRequest(db, a, 't5');
     createAnsweredRuleAnalysis(db, b, {}, 'rule', 'low', 't1');
     createAnalysisRequest(db, c, 't1');
+    // Same answered_at as b's rule row: the higher id wins the tie.
+    createAnsweredRuleAnalysis(db, b, {}, 'rule again', 'low', 't1');
     const m = latestAnsweredAnalyses(db, [a, b, c]);
     expect(m.get(a)?.summary).toBe('newer');
     expect(m.get(b)?.source).toBe('rule');
+    expect(m.get(b)?.recommendation).toBe('rule again');
     expect(m.has(c)).toBe(false);
+    expect(m.get(a)).not.toHaveProperty('context');
+    expect(m.get(b)).not.toHaveProperty('context');
     expect(latestAnsweredAnalyses(db, []).size).toBe(0);
     db.close();
   });
