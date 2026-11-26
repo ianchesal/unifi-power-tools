@@ -72,6 +72,11 @@ export function activeEntryIds(db: LensDb): Set<number> {
   return new Set(listEntries(db, { status: 'active' }).map((e) => e.id));
 }
 
+// Marks an entry as the one seeded from a shipped default.
+export function setEntryDefaultKey(db: LensDb, entryId: number, key: string): void {
+  db.conn.prepare('UPDATE playbook_entries SET default_key = ? WHERE id = ?').run(key, entryId);
+}
+
 function assertText(op: ProposalOp, title: string, body: string): void {
   if (op === 'retire') return;
   if (title.trim() === '' || body.trim() === '') {

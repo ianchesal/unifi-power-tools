@@ -9,6 +9,8 @@ import { openLensDb } from './db/lensDb.js';
 import { openSinkDb, type SinkDb, verifySchema } from './db/sinkDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
 import { createLogger } from './logger.js';
+import { PLAYBOOK_DEFAULTS } from './mcp/playbook/defaults.js';
+import { seedPlaybookDefaults } from './mcp/playbook/seed.js';
 import { createApp, type SchemaCheckResult } from './server.js';
 
 const config = loadConfig();
@@ -37,6 +39,15 @@ try {
 }
 
 const lensDb = openLensDb(config.lensDbPath);
+// A seeding failure only costs the default playbook entries, so keep booting.
+try {
+  const seeded = seedPlaybookDefaults(lensDb, PLAYBOOK_DEFAULTS, new Date().toISOString());
+  logger.info(
+    `Playbook defaults: ${seeded.inserted} inserted, ${seeded.proposed} update(s) proposed`
+  );
+} catch (err) {
+  logger.error('Seeding playbook defaults failed', err);
+}
 const homelabServices = loadHomelabServices(config.homelabServicesPath);
 const runnerDeps: RunnerDeps | null = sinkDb
   ? {
