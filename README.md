@@ -6,7 +6,7 @@ automatic triage pipeline that ends in either a closed finding or a short
 "needs attention" list, with a Claude Code session doing the AI step over
 MCP, without this service needing any API key of its own.
 
-![UniFi SIEM Lens dashboard: triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), trend charts, and a findings list. Screenshot predates the Needs attention / Closed views.](docs/images/dashboard.png)
+![UniFi SIEM Lens dashboard: triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), trend charts, the AI queue strip with its copy-prompt button, and a Needs attention card with Claude Code's recommended action. Demo data only.](docs/images/dashboard.png)
 
 ## Why this exists
 
