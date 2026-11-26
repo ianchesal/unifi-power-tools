@@ -130,12 +130,13 @@ and lens's `lens.db` are reused unchanged, in one `/data` volume.
      -v unifi-siem-sink_siem-data:/old-sink:ro \
      -v unifi-siem-lens_lens-data:/old-lens:ro \
      -v unifi-power-tools_data:/data \
-     alpine sh -c "cp -a /old-sink/events.db* /data/ && cp -a /old-lens/lens.db* /data/ && chown $UPT_UID:$UPT_GID /data /data/*.db*"
+     alpine sh -c "cp -a /old-sink/events.db* /data/ && cp -a /old-lens/lens.db* /data/ && { cp -a /old-lens/homelab-services.json /data/ 2>/dev/null || true; } && chown -R $UPT_UID:$UPT_GID /data"
    ```
 
    The `events.db*` and `lens.db*` globs pick up any `-wal`/`-shm` files
-   left behind. Chowning `/data` itself matters: SQLite creates its WAL file
-   next to the database.
+   left behind, and a homelab registry kept next to `lens.db` comes along too
+   (point `HOMELAB_SERVICES_PATH` at `/data/homelab-services.json`). Chowning
+   `/data` itself matters: SQLite creates its WAL file next to the database.
 3. **Write the new `.env`** from [`server/.env.example`](server/.env.example).
    Startup fails, naming the replacement, if an old variable is still set:
    `SINK_DB_PATH` and `DB_PATH` became `EVENTS_DB_PATH`, `MCP_PORT`/`MCP_HOST`
