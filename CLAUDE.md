@@ -11,20 +11,20 @@ the sibling project `unifi-siem-sink`'s event store. It reads
 repeat-offender tracking, z-score anomaly detection) to produce *findings*,
 and serves both a React dashboard and an MCP server. The MCP server is the
 key mechanism: this project has no LLM access of its own (no API key), so
-"Analyze this" on a finding just queues a request — a Claude Code session
-(subscription-authenticated, configured with this project's `/mcp`
+a finding the rules can't close is auto-queued as a request — a Claude Code
+session (subscription-authenticated, configured with this project's `/mcp`
 endpoint) fetches pending requests, reasons about them with real event
-context, and posts a recommendation back via `submit_analysis`. It pairs
+context, and posts a verdict (`close` or `attention`) back via
+`submit_analysis`. It pairs
 with `unifi-mcp-server` (rest of the UniFi Network API) and
 `unifi-siem-sink` (the event source); this project adds no new UniFi API
 coverage, only analysis on top of what the sink already collects.
 
-A second, purely code-driven layer complements the Claude Code handoff: a
-small set of rules (trusted-admin console logins, WAN/operational noise,
-blocked reputation-blocklist IDS hits) auto-dismiss a finding the moment
-it's detected, with no Claude Code session ever involved, for the cases
-where the verdict is mechanical rather than something worth an LLM's
-attention.
+A second, purely code-driven layer runs first: a set of rules (trusted-admin
+console logins, WAN/operational noise, blocked reputation-blocklist IDS hits,
+...) close a finding the moment it's detected, with no Claude Code session
+ever involved, for the cases where the verdict is mechanical rather than
+something worth an LLM's attention.
 
 See `docs/superpowers/specs/2026-08-31-lens-design.md` for the full design
 spec (architecture rationale, trigger/finding lifecycle rules, and the
@@ -84,7 +84,8 @@ shadow them.
   signature daily counts for anomaly detection), `seen_signatures` /
   `seen_source_ips` (first-seen tracking), `findings`, and
   `analysis_requests` (the Claude Code handoff queue), plus `seen_clients`
-  (first-seen tracking for client findings, below).
+  (first-seen tracking for client findings, below) and `finding_history`
+  (the per-finding audit trail, written by `pipeline.ts`).
 
 ### Analysis engine (`server/src/analysis/`)
 
@@ -98,11 +99,11 @@ run, mirroring the sink's "never stop listening" philosophy.
 `IGNORED_SIGNATURE_KEYS` (in `newEntity.ts`) lists exact `category|signature`
 pairs excluded from analysis entirely — filtered out of the runner's hourly
 event scan and the daily anomaly baselines, so they never become findings
-at all (unlike the rule-triage layer below, which dismisses findings after
+at all (unlike the rule-triage layer below, which closes findings after
 creation). Currently just `siteactivity|2154`, the UniFi Protect doorbell ring.
 Findings that predate a key's addition to the list are cleaned up by the
 admin backfill, via an `ignored_signature` rule checked first in
-`tryRuleTriage`'s signature branch (no completeness counts — the key alone
+`matchRules`'s signature branch (no completeness counts — the key alone
 pins it).
 
 **Client findings** (`entity_type: 'client'`, keyed by `source_client_mac`
@@ -117,12 +118,13 @@ findings for historical client-only alerts; each gets `new_client` +
 `internal_source` (always — LAN by definition; it's there so clients rank
 with internal IPs). `repeat-offender-client` mirrors the IP repeat-offender
 pass in its own `runCheck`. Client findings never get rule triage:
-`tryRuleTriage` returns early for them and the backfill skips them — without
-that guard a client finding would fall into the signature branch with its
-MAC parsed as a signature key. **Old-sink isolation rule:** only the
-client-only helpers at the bottom of `sinkQueries.ts` may reference the
-`source_client_*` / `dest_client_*` columns; `recentEvents` and every other
-existing query must not, so a pre-v1.0.3 sink loses only client features.
+`matchRules` returns null for them and the backfill skips them, so they are
+always queued for AI — without that guard a client finding would fall into
+the signature branch with its MAC parsed as a signature key.
+**Old-sink isolation rule:** only the client-only helpers at the bottom of
+`sinkQueries.ts` may reference the `source_client_*` / `dest_client_*`
+columns; `recentEvents` and every other existing query must not, so a
+pre-v1.0.3 sink loses only client features.
 Client and IP findings for the same host are deliberately not merged (see
 `docs/superpowers/specs/2026-11-25-client-entities-design.md`).
 
@@ -131,90 +133,101 @@ above the trailing baseline registers, never a drop. A drop in alert volume
 is more likely a collection/operational problem than a security one for an
 IDS/IPS use case.
 
-**Findings lifecycle** (`server/src/analysis/findings.ts`) is the most
-spec-critical module — read it before touching it. A finding accumulates
-`triggers`; only `anomaly` and `repeat_offender` are "standing" conditions
-that can auto-resolve when they lift (`reevaluateTrigger`); `new_signature`,
-`new_source_ip`, and `internal_source` are one-off/permanent facts that
-never auto-resolve and always require manual dismissal. Adding a *new*
-trigger type to an existing finding always reopens it to `status: 'new'`,
-even from `dismissed` — an escalation must never sit silently hidden behind
-an old dismissal. A `resolved` finding also reopens to `new` if a
-previously-inactive standing trigger reactivates (a status recomputed by
-the system, not a human decision, so it doesn't get the same "leave it
-alone" treatment `acknowledged`/`dismissed` do).
+**Findings lifecycle** (`server/src/analysis/findings.ts`, `pipeline.ts`) is
+the most spec-critical area — read both, and
+`docs/superpowers/specs/2026-11-25-findings-triage-redesign-design.md`, before
+touching it. A finding is `triaging` (waiting on rules/AI), `attention` (the
+operator should do or verify something in UniFi) or `closed` (with `closed_by`
+`rule | ai | human | system`, the last for migrated legacy rows). A finding
+accumulates `triggers`; `anomaly` and `repeat_offender` are "standing"
+(`reevaluateTrigger` flips `active`) but triggers **never change status** —
+the one exception is `applyTrigger` sending a rule-closed finding that gains
+`internal_source` back to `triaging`. Status changes only through
+`pipeline.ts`, the single transition module (`closeByRule`, `applyAiVerdict`,
+`humanClose`/`humanReopen`, `reanalyze`, `recheckStillClosed`/`recheckRequeue`):
+each asserts the transition is legal (`assertTransition`), cancels any pending
+analysis request when the finding leaves `triaging`, and writes
+`finding_history` rows, all in one transaction (re-entrant via `atomically`).
+`last_activity_at` is maintained by the hourly run; `last_triaged_at` is the
+last decision, and `decisionWindowStart` (that, else `closed_at`, else
+`first_seen - 14d`) is where "activity since the last decision" starts.
 
-### MCP handoff (`server/src/mcp/tools.ts`, `server/src/db/analysisRequestsStore.ts`)
+**Recheck** (`runDailyRecheck` in `runner.ts`, run after the daily anomaly
+check): a `closed` finding with `last_activity_at` past its last decision (and
+no recheck in 24h, `isRecheckDue`) is re-run through `matchRules` over the
+decision window; a match keeps it closed, anything else is re-queued for AI
+with `is_recheck` set, and the verdict must then supply `why_now`.
 
-`POST /findings/:id/analyze` queues an `analysis_requests` row (deduped —
-at most one `pending` request per finding at a time) with a context bundle
-of the finding, recent matching raw events from `events.db`, baseline
-history, and (if `UNIFI_MCP_SERVER_URL` is configured) an enrichment
-lookup via `unifi-mcp-server`. `get_pending_analyses` / `get_analysis_context`
-/ `submit_analysis` are the three MCP tools a Claude Code session drives;
-`submit_analysis` throws on an already-answered or nonexistent request
-rather than silently overwriting.
+### MCP handoff (`server/src/mcp/`, `server/src/db/analysisRequestsStore.ts`)
 
-`analysis_requests.source` (`'ai' | 'rule'`, default `'ai'` at the DB
-level) distinguishes a Claude Code-authored recommendation from one the
-rule engine below wrote directly — the dashboard's analysis panel surfaces
-this ("via Claude Code" vs "auto-triaged by rule"). Rule-sourced rows are
-inserted already `answered`; they never pass through `pending`, so they
-never appear in `get_pending_analyses`.
+There is no "Analyze this" click: the pipeline queues an `analysis_requests`
+row (`queueForAnalysis`, at most one `pending` per finding) for every finding
+the rules don't close, including client findings, and for rechecks
+(`is_recheck`). The context bundle is **not stored at queue time** — it is
+built when a session fetches it (`mcp/context.ts`, `buildAnalysisContext`):
+the finding, `finding_history`, prior analyses, recent matching events (LIMIT
+20), baseline history, `since_last_decision` counts (total and unblocked IPS
+alerts), a `recheck` before/after summary, and optional `unifi-mcp-server` /
+homelab enrichment. Tools: `get_pending_analyses {limit?}`,
+`get_analysis_context {id}`, and `submit_analysis {id, verdict: 'close' |
+'attention', risk_level, summary, reasoning, recommended_action?, why_now?,
+cited_entries?}`. `submit_analysis` goes through `applyAiVerdict`, which runs
+the guardrails in `analysis/verdict.ts` before any write (a rejected verdict
+leaves the request pending): non-blank summary/reasoning, `attention` needs
+`recommended_action`, a recheck needs `why_now`, and a `close` with no cited
+entry is rejected when unblocked IPS alerts exist since the last decision or
+when the sink can't be checked (fails closed). Phase A has no playbook, so
+`PHASE_A_ACTIVE_ENTRY_IDS` is empty and any cited id is rejected. It also
+throws on an already-answered, cancelled or nonexistent request.
 
-### Rule-based auto-triage (`server/src/analysis/ruleTriage.ts`, `runner.ts`)
+`analysis_requests.source` (`'ai' | 'rule'`) distinguishes a Claude Code
+verdict from one the rule engine wrote directly (`closeByRule`); rule rows are
+inserted already `answered`, never pass through `pending`, and the dashboard
+shows which produced a decision.
+
+### Rule-based auto-triage (`analysis/ruleTriage.ts`, `matchRules.ts`, `runner.ts`)
 
 `ruleTriage.ts` is a pure, zero-I/O module (matching `cidr.ts`/`newEntity.ts`/
-`baseline.ts`'s pattern) exporting three rule-matching functions —
-`tryAdminAuditLoginRule`, `tryOperationalNoiseRule`,
-`tryReputationBlocklistRule` — each taking already-computed data (event
-rows or `{ total, matching }` SQL completeness counts) and returning a
-`TriageVerdict` (`risk_level` always `'low'`) or `null`. A rule matches
-only when **every** event backing the finding satisfies it — completeness
-is checked via paired `COUNT(*)` SQL queries in `sinkQueries.ts`
+`baseline.ts`'s pattern) of rule functions — `tryAdminAuditLoginRule`,
+`tryOperationalNoiseRule`, `tryLowSignalCategoryRule`,
+`tryReputationBlocklistRule`, `tryHomelabServiceRule`, `tryExposedHostScanRule`,
+`tryIgnoredSignatureRule` (`RuleName`: `admin_login`, `operational_noise`,
+`low_signal_category`, `reputation_blocklist`, `homelab_service_egress`,
+`exposed_host_scan`, `ignored_signature`) — each taking already-computed data
+and returning a `TriageVerdict` (`risk_level` always `'low'`) or `null`. A rule
+matches only when **every** event backing the finding satisfies it —
+completeness is checked via paired `COUNT(*)` SQL queries in `sinkQueries.ts`
 (`sourceIpEventCounts`/`signatureEventCounts`/`auditCandidateEvents`),
-deliberately *not* the `eventsForSignature`/`eventsForSourceIp` fetchers
-(`LIMIT 20`, sized for LLM prompt context) — a burst of more than 20 events
-could otherwise let the most recent 20 silently stand in for "every event."
+deliberately *not* the `eventsFor*` fetchers (`LIMIT 20`, sized for LLM prompt
+context) — a burst of more than 20 events could otherwise let the most recent
+20 silently stand in for "every event."
 
-`runner.ts`'s local `tryRuleTriage` helper wires this into `runHourlyChecks`:
-right after a `new_signature`/`new_source_ip` finding is created/updated,
-it tries the three rules in order (admin login → operational noise →
-reputation blocklist, first match wins) and, on a match, writes an
-already-answered `source: 'rule'` analysis_requests row
-(`createAnsweredRuleAnalysis`) and dismisses the finding directly
-(`setFindingStatus`) — no queue, no click, no AI involved. A finding that
-doesn't fully match any rule is left exactly as it would be without this
-feature. Scope is deliberately narrow: only `new_signature`/`new_source_ip`
-findings are eligible for all three rules — `anomaly`/`repeat_offender` are
-standing conditions this doesn't apply to.
+`matchRules(deps, finding, sinceIso, untilIso?, allowedRules?)` in
+`matchRules.ts` is the query-only evaluator: first match wins, never writes,
+returns `{ rule, verdict }` or null. Callers decide what a match means: the
+runner's creation pass and the backfill call `closeByRule`, the daily recheck
+calls `recheckStillClosed`. Every new finding is offered to the rules; a miss
+leaves it `triaging` with a queued request.
 
-The `internal-source` loop gets one narrower exception: right after applying
-an `internal_source` trigger, it also calls `tryRuleTriage` restricted to
-`operational_noise` only (an `allowedRules` param on `tryRuleTriage`) — being
-on the LAN carries no security signal for a finding whose events are all
-non-security operational telemetry, so that trigger alone shouldn't keep it
-stuck at `new` until someone runs the backfill by hand. Deliberately *not*
-extended to `admin_login`/`reputation_blocklist`: an internal host tripping
-one of those is exactly the "possible compromised host talking out" case
-internal-source flagging exists to catch (see the design spec), so it must
-keep surfacing for manual review — the existing "same-pass reopen" test in
-`runner.test.ts` covers that this still escalates back to `new` rather than
-staying auto-dismissed.
+**Internal-source restriction (every pass):** a finding carrying
+`internal_source` can only be closed by `operational_noise` — enforced inside
+`matchRules` itself, so the hourly path, the recheck and the backfill all obey
+it. An internal host tripping `admin_login`/`reputation_blocklist`/etc. is the
+"possible compromised host talking out" case and must reach the AI (the "same-
+pass reopen" test in `runner.test.ts` covers it).
 
-Because this only fires at the moment of creation, findings that predate
-the feature (or predate `TRUSTED_ADMIN_NAMES` being configured) never get
-a rule pass on their own. `runRuleTriageBackfill` (also in `runner.ts`,
-exposed via `POST /api/admin/backfill-rule-triage` and the `/admin`
-dashboard page) re-checks every existing `new`/`acknowledged` finding —
-including ones already AI-analyzed — anchoring each finding's completeness
-window to `[finding.first_seen - 24h, finding.first_seen)` rather than
-`[first_seen, first_seen + 24h)`: `first_seen` is stamped with the
-*detection run time*, at the end of the live path's trailing 24h scan, not
-the start, so the events that triggered detection are all *before*
-`first_seen`, not after it. Getting this window backwards is a documented
-past bug — see the `runner.ts` comment above `runRuleTriageBackfill` before
-changing it.
+`runRuleTriageBackfill` (`runner.ts`, `POST /api/admin/backfill-rule-triage`,
+the `/admin` page; returns `{ checked, closed, byRule }`) re-checks only
+`triaging`, non-client findings that were never decided (`last_triaged_at`
+NULL) — a finding requeued by a recheck, reopened by `internal_source` or
+re-analyzed is waiting because of events after its last decision, so its
+creation window is stale. The window comes from the creating trigger
+(`backfillWindow`: `repeat_offender` → 14d before `first_seen`; `anomaly` →
+the anomaly day; otherwise 24h before `first_seen`), always ending at
+`first_seen`: it is stamped with the *detection run time*, at the end of the
+live path's scan, so the evidence is *before* it. Getting this window backwards
+is a documented past bug — see the `runner.ts` comment above `backfillWindow`
+before changing it.
 
 ### Optional enrichment (`server/src/enrichment/unifiMcpClient.ts`)
 

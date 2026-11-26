@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { fetchJson } from './api';
 import { AdminPage } from './components/AdminPage';
 import { EventsOverTimeChart } from './components/EventsOverTimeChart';
-import { FindingsList } from './components/FindingsList';
+import { FindingsSection } from './components/FindingsSection';
 import { KpiStats } from './components/KpiStats';
+import { QueueStrip } from './components/QueueStrip';
 import { SeverityChart } from './components/SeverityChart';
 import { TopSignaturesChart } from './components/TopSignaturesChart';
 import { TopSourceIpsChart } from './components/TopSourceIpsChart';
 import { RefreshIcon, SettingsIcon, ShieldIcon } from './icons';
+import type { QueueStats } from './types';
 
 interface Health {
   status: 'ok' | 'degraded';
@@ -32,9 +34,16 @@ function Dashboard() {
   const [health, setHealth] = useState<Health | null>(null);
   const [sinceDays, setSinceDays] = useState(7);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [queue, setQueue] = useState<QueueStats | null>(null);
+  const bumpRefresh = () => setRefreshKey((k) => k + 1);
 
   useEffect(() => {
     fetchJson<Health>('/health').then(setHealth).catch(() => setHealth(null));
+    // Fetched once per refresh for both the KPI tile and the queue strip; a
+    // failed refresh keeps the last good value rather than hiding the strip.
+    fetchJson<QueueStats>('/api/queue')
+      .then(setQueue)
+      .catch(() => {});
   }, [refreshKey]);
 
   const sinkAvailable = health?.sinkDb === 'available';
@@ -57,7 +66,7 @@ function Dashboard() {
             <span className="status-dot" />
             {health === null ? 'Checking sink…' : sinkAvailable ? 'Sink connected' : 'Sink unavailable'}
           </div>
-          <button className="icon-btn" type="button" aria-label="Refresh" onClick={() => setRefreshKey((k) => k + 1)}>
+          <button className="icon-btn" type="button" aria-label="Refresh" onClick={bumpRefresh}>
             <RefreshIcon />
           </button>
         </div>
@@ -83,7 +92,7 @@ function Dashboard() {
           </div>
         </div>
 
-        <KpiStats refreshKey={refreshKey} />
+        <KpiStats refreshKey={refreshKey} queue={queue} />
 
         <div className="section">
           <div className="section-head">
@@ -100,7 +109,10 @@ function Dashboard() {
           </div>
         </div>
 
-        <FindingsList refreshKey={refreshKey} />
+        <div className="section">
+          <QueueStrip refreshKey={refreshKey} queue={queue} />
+          <FindingsSection refreshKey={refreshKey} onChanged={bumpRefresh} />
+        </div>
       </div>
 
       <footer>

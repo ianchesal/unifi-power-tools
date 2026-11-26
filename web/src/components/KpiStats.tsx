@@ -1,17 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fetchJson } from '../api';
-import { severityBand } from '../severity';
-
-interface Trigger {
-  type: string;
-  active: boolean;
-}
-
-interface Finding {
-  id: number;
-  severity_score: number;
-  triggers: Trigger[];
-}
+import { relativeTime } from '../format';
+import type { FindingsSummary, QueueStats } from '../types';
 
 interface EventsRow {
   day: string;
@@ -19,12 +9,12 @@ interface EventsRow {
   count: number;
 }
 
-export function KpiStats({ refreshKey }: { refreshKey: number }) {
-  const [findings, setFindings] = useState<Finding[] | null>(null);
+export function KpiStats({ refreshKey, queue }: { refreshKey: number; queue: QueueStats | null }) {
+  const [summary, setSummary] = useState<FindingsSummary | null>(null);
   const [eventRows, setEventRows] = useState<EventsRow[] | null>(null);
 
   useEffect(() => {
-    fetchJson<Finding[]>('/api/findings').then(setFindings).catch(() => setFindings(null));
+    fetchJson<FindingsSummary>('/api/findings-summary').then(setSummary).catch(() => setSummary(null));
   }, [refreshKey]);
 
   useEffect(() => {
@@ -33,10 +23,10 @@ export function KpiStats({ refreshKey }: { refreshKey: number }) {
       .catch(() => setEventRows(null));
   }, [refreshKey]);
 
-  const openFindings = findings?.length ?? null;
-  const critical = findings?.filter((f) => severityBand(f.severity_score) === 'crit').length ?? null;
-  const repeatOffenders =
-    findings?.filter((f) => f.triggers.some((t) => t.type === 'repeat_offender' && t.active)).length ?? null;
+  const attention = summary?.attention ?? null;
+  const closed = summary?.closed_last_7d ?? null;
+  const closedTotal = closed ? closed.rule + closed.ai + closed.human + closed.system : null;
+  const oldestAge = relativeTime(queue?.oldest_created_at);
 
   let last24h: number | null = null;
   let priorDayDeltaPct: number | null = null;
@@ -58,15 +48,8 @@ export function KpiStats({ refreshKey }: { refreshKey: number }) {
   return (
     <div className="kpi-grid">
       <KpiCard
-        label="Open findings"
-        value={openFindings}
-        iconBg="var(--accent-soft)"
-        iconColor="#7fb2ee"
-        icon={<path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />}
-      />
-      <KpiCard
-        label="Critical priority"
-        value={critical}
+        label="Needs attention"
+        value={attention}
         iconBg="var(--critical-soft)"
         iconColor="#f28c88"
         icon={
@@ -75,8 +58,24 @@ export function KpiStats({ refreshKey }: { refreshKey: number }) {
             <path d="M12 10v4M12 17h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
           </>
         }
-        delta={critical !== null && critical > 0 ? 'needs review' : undefined}
-        deltaClass={critical !== null && critical > 0 ? 'up' : undefined}
+        delta={attention !== null && attention > 0 ? 'needs review' : undefined}
+        deltaClass={attention !== null && attention > 0 ? 'up' : undefined}
+      />
+      <KpiCard
+        label="AI queue"
+        value={queue?.count ?? null}
+        iconBg="var(--accent-soft)"
+        iconColor="#7fb2ee"
+        icon={<path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />}
+        delta={queue && queue.count > 0 && oldestAge ? `oldest ${oldestAge}` : undefined}
+      />
+      <KpiCard
+        label="Closed, 7d"
+        value={closedTotal}
+        iconBg="var(--good-soft)"
+        iconColor="var(--good)"
+        icon={<path d="m5 12 5 5 9-10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
+        delta={closed ? `rule ${closed.rule} · AI ${closed.ai} · human ${closed.human}` : undefined}
       />
       <KpiCard
         label="Events, 24h"
@@ -87,21 +86,6 @@ export function KpiStats({ refreshKey }: { refreshKey: number }) {
         icon={<path d="M3 17 9 9l4 4 8-10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />}
         delta={priorDayDeltaPct !== null ? `${priorDayDeltaPct > 0 ? '+' : ''}${priorDayDeltaPct}% vs prior day` : undefined}
         deltaClass={priorDayDeltaPct !== null ? (priorDayDeltaPct > 0 ? 'up' : 'down') : undefined}
-      />
-      <KpiCard
-        label="Repeat offenders"
-        value={repeatOffenders}
-        iconBg="var(--warning-soft)"
-        iconColor="#f7c860"
-        icon={
-          <path
-            d="M17 2 21 6l-4 4M3 12v-2a4 4 0 0 1 4-4h14M7 22 3 18l4-4M21 12v2a4 4 0 0 1-4 4H3"
-            stroke="currentColor"
-            strokeWidth="1.7"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        }
       />
     </div>
   );

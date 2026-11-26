@@ -2,11 +2,11 @@
 
 Visualization dashboard and code-driven analysis layer for UniFi IDS/IPS
 security events — trend charts, anomaly/repeat-offender detection, and a
-"queue for Claude" handoff so a Claude Code session can turn a flagged
-finding into an actual recommendation, without this service needing any
-API key of its own.
+automatic triage pipeline that ends in either a closed finding or a short
+"needs attention" list, with a Claude Code session doing the AI step over
+MCP, without this service needing any API key of its own.
 
-![UniFi SIEM Lens dashboard: KPI cards for open findings, critical severity, 24h events, and repeat offenders; trend charts for events over time, top signatures, top source IPs, and severity distribution; and a findings list with acknowledge/dismiss/analyze actions.](docs/images/dashboard.png)
+![UniFi SIEM Lens dashboard: triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), trend charts, and a findings list. Screenshot predates the Needs attention / Closed views.](docs/images/dashboard.png)
 
 ## Why this exists
 
@@ -26,16 +26,16 @@ UDM Pro:
   code-driven heuristics (new signature/source-IP detection, internal-source
   flagging, repeat-offender tracking, statistical anomaly detection) against
   the sink's event history, turns anything interesting into a *finding*, and
-  renders trends and findings on a dashboard. When a finding is worth a
-  closer look, one click queues it for analysis — a Claude Code session
-  (running on your Claude subscription, no separate API key) checks in over
-  MCP, reasons about the finding with the real events as context, and posts
-  a recommendation back into the app.
-  A second, purely code-driven layer goes further for the common case: a
-  handful of rules (a trusted admin's own console login, WAN/operational
-  noise, a blocked hit from a known reputation/blocklist IDS signature)
-  auto-dismiss a finding the moment it's detected, with no Claude Code
-  session involved at all — see [Rule-based auto-triage](#rule-based-auto-triage) below.
+  renders trends and findings on a dashboard. Every new finding goes
+  through a triage pipeline: first a handful of code-driven rules (a trusted
+  admin's own console login, WAN/operational noise, a blocked reputation/
+  blocklist IDS hit, ...) close it on the spot — see
+  [Rule-based auto-triage](#rule-based-auto-triage) — and anything they
+  don't fully explain is queued automatically for a Claude Code session
+  (running on your Claude subscription, no separate API key). It checks in
+  over MCP, reasons about the finding with the real events as context, and
+  either closes it or flags it as **needs attention** with what to do in the
+  UniFi console. Closed findings that see new activity are rechecked daily.
 
 Run all three and an LLM gets full visibility into the network (via
 `unifi-mcp-server`), full visibility into the security event stream (via
@@ -98,21 +98,65 @@ project name, adjust `unifi-siem-sink` above to match.
 ```
 
 Then, in a Claude Code session with this configured, ask it to check for
-pending analyses. It'll fetch any findings you've queued from the
-dashboard, reason about them with the actual event context, and post
-recommendations back — which then show up next to the finding.
+pending analyses. Findings the rules couldn't close are queued automatically;
+the session fetches them, reasons about each with the actual event context,
+and posts a verdict (close, or needs attention) back — which then shows up
+next to the finding.
 
 ## Dashboard & MCP tools
 
 | Surface | What it gives you |
 |---|---|
-| Dashboard (`/`) | Events-over-time, top signatures, top source IPs, and severity-distribution charts; a findings list with status tabs (Active/New/Acknowledged/Dismissed/Resolved/All), an "Analyze all" button, and per-finding Acknowledge/Dismiss/Analyze actions. Each answered finding shows whether its recommendation came "via Claude Code" or was "auto-triaged by rule". |
+| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip, events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). |
 | Admin (`/admin`) | One-off maintenance actions — currently just the rule-triage backfill (see below). |
 | `GET /health` | Liveness + sink DB / schema-contract status. |
-| `POST /api/admin/backfill-rule-triage` | Re-checks every existing `new`/`acknowledged` finding against the auto-triage rules; returns `{ checked, dismissed, byRule }`. |
-| `get_pending_analyses` (MCP) | List analysis requests queued from the dashboard, awaiting a recommendation. |
-| `get_analysis_context` (MCP) | Full context for one request: the finding, its trigger/baseline history, and the relevant raw events. |
-| `submit_analysis` (MCP) | Post a recommendation + risk level back for a pending request. |
+| `GET /api/findings` | List findings. `view=open\|attention\|triaging\|closed\|all` (default `open`), optional `closed_by`, `q`, and `limit`/`offset` (paginated as `{ items, total }`). Each item carries its latest answered analysis and the note of its latest reopen (`latest_reopen_note`). |
+| `GET /api/findings-summary` | Counts for the KPI tiles: `{ attention, triaging, closed_last_7d }`. |
+| `GET /api/findings/:id/history` | A finding's audit trail (created, rule/AI/human decisions, rechecks, reopens). |
+| `GET /api/findings/:id/activity` | The raw sink events behind a finding. |
+| `POST /api/findings/:id/close` | Operator closes an `attention` finding: `{ kind: "handled" \| "not_concern", note? }`. |
+| `POST /api/findings/:id/reopen` | Operator reopens a `closed` finding back to needs attention: `{ note }` (required). |
+| `POST /api/findings/:id/reanalyze` | Re-queue a `closed` or `attention` finding for AI analysis. |
+| `GET /api/analysis-requests` | Pending requests, or all of a finding's with `?findingId=`. |
+| `GET /api/queue` | AI queue stats for the queue strip. |
+| `POST /api/admin/backfill-rule-triage` | Re-checks every never-decided `triaging` finding against the auto-triage rules; returns `{ checked, closed, byRule }`. |
+| `get_pending_analyses` (MCP) | List queued analysis requests, highest severity first (`limit?`). |
+| `get_analysis_context` (MCP) | Full context for one request, built when you fetch it: the finding, its history, prior analyses, recent events, activity since the last decision, and (for rechecks) before/after activity summaries. |
+| `submit_analysis` (MCP) | Post a verdict (`close` or `attention`) with risk level, summary and reasoning; see [Verdict guardrails](#verdict-guardrails). |
+
+## Finding lifecycle
+
+Every finding is in one of three states:
+
+- **`triaging`** — waiting on the pipeline: the rules didn't close it, so an
+  analysis request is queued for Claude Code.
+- **`attention`** — the AI decided you should do or verify something in the
+  UniFi console. The card says what (`recommended_action`) and, for a
+  finding that came back, why now (`why_now`).
+- **`closed`** — handled, with `closed_by` (`rule`, `ai`, `human`, or
+  `system` for findings migrated from the old status set) and a reason.
+
+Each state change is written to the finding's history. A closed finding that
+sees new activity is rechecked daily (at most once per 24h): if a rule still
+explains everything since the last decision it stays closed, otherwise it
+goes back to the AI queue as a recheck, which must explain what changed.
+Gaining an `internal_source` trigger sends a rule-closed finding back to
+`triaging`. Triggers no longer change status on their own.
+
+Findings from before this model are migrated by lens.db migration 4.
+
+### Verdict guardrails
+
+`submit_analysis` rejects (leaving the request pending so it can be retried):
+
+- a blank `summary` or `reasoning`;
+- an `attention` verdict without `recommended_action` (what to do in the
+  UniFi console);
+- a recheck without `why_now`;
+- a `close` with no cited playbook entry while unblocked IPS alerts exist
+  since the last decision, or when the sink can't be checked (fails closed).
+  The playbook arrives in a later phase, so for now any cited entry id is
+  rejected: a close is only accepted when every IPS alert was blocked.
 
 ## Client findings
 
@@ -139,30 +183,40 @@ MACs don't).
 Most findings a live network throws off don't need an LLM at all: your own
 console logins, the gateway's WAN-health blips, and routine reputation-list
 scans that UniFi already auto-blocked. Rather than queuing every one of
-these for a Claude Code session, lens checks each new `new_signature`/
-`new_source_ip` finding against three rules the moment it's detected, and
-auto-dismisses it — with a canned, code-generated recommendation, no
-Claude Code session involved — if every event behind it is fully explained
-by one of them:
+these for a Claude Code session, lens checks each new finding against a
+set of rules the moment it's detected, and closes it — with a canned,
+code-generated reason, no Claude Code session involved — if every event
+behind it is fully explained by one rule:
 
 1. **Trusted admin login** — a console login from an admin name in
    `TRUSTED_ADMIN_NAMES` (see [Environment Variables](#environment-variables) below; empty by default, so this rule never fires unconfigured).
 2. **Operational noise** — WAN/device-health telemetry, not a security
    signal.
-3. **Reputation/blocklist scan** — a blocked hit from a known
+3. **Low-signal category** — routine `system` / `adminactivity` / `detection` events.
+4. **Reputation/blocklist scan** — a blocked hit from a known
    reputation-feed IDS signature family (`SAFE_SIGNATURE_PREFIXES`).
+5. **Homelab service egress** — blocked outbound hits on a documented
+   homelab service's own port (needs `HOMELAB_SERVICES_PATH`).
+6. **Exposed-host scan** — blocked inbound hits on a host marked
+   `wanExposed` in the homelab services file.
+7. **Ignored signature** — an exact signature excluded from analysis
+   (currently the Protect doorbell ring).
+
+A finding with an `internal_source` trigger can only be closed by the
+operational-noise rule: an internal host tripping any other rule is the
+"possible compromised host" case and always goes to the AI.
 
 A finding that isn't *fully* explained by a rule (mixed events, an
-unrecognized signature, an untrusted admin name) is left alone exactly as
-before — it still needs a manual "Analyze this" and a Claude Code session.
+unrecognized signature, an untrusted admin name) is queued for Claude Code
+automatically. Client findings never match a rule and are always queued.
 
-Because this only runs at the moment a finding is first created, findings
-already sitting in the database before you configure `TRUSTED_ADMIN_NAMES`
-(or before you upgrade to a lens version that has this feature) never get a
-rule pass on their own. Visit **`/admin`** and click **Run backfill** to
-sweep the auto-triage rules over your existing `new`/`acknowledged`
-findings — safe to run repeatedly, it only ever touches findings still
-sitting at those two statuses.
+Because the rules only run when a finding is created (and on the daily
+recheck), findings still `triaging` from before you configured
+`TRUSTED_ADMIN_NAMES` (or before you upgraded) never get a rule pass on
+their own. Visit **`/admin`** and click **Run backfill** to sweep the
+rules over never-decided `triaging` findings, using each finding's original
+detection window — safe to run repeatedly; findings the AI already decided
+or the operator re-queued are left alone.
 
 ## Homelab/local-service enrichment
 
@@ -212,12 +266,12 @@ image.
    a missing or malformed file is a silent no-op, never a startup failure.
 
 **What it affects:** only the context bundle built when a finding is
-queued via **Analyze** (`POST /findings/:id/analyze`) — each recent event
+fetched by a Claude Code session (`get_analysis_context`) — each recent event
 in that bundle gets a `homelab: { host, service }` field the analyzing
-Claude Code session sees alongside the raw event. It has no effect on the
-dashboard, the rule-based auto-triage layer, or findings already queued
-before the file existed — re-run **Analyze** on a finding to pick up a
-newer version of the file.
+session sees alongside the raw event. The bundle is built at fetch time, so
+an edited file is picked up on the next fetch without re-queuing. (The
+`homelab_service_egress` and `exposed_host_scan` auto-triage rules also read
+it.)
 
 `server/homelab-services.example.json` (checked in) documents the shape
 with placeholder values; `server/data/homelab-services.json` (gitignored,
@@ -229,10 +283,11 @@ for `HOMELAB_SERVICES_PATH`.
 
 If you're working in this repo with Claude Code, `server/.claude/skills/analyzing-findings/`
 ships a skill (scoped to the `server` workspace, since it drives the MCP
-analysis handoff) that automates the ad hoc "check for pending analyses"
+analysis handoff) that automates the "check for pending analyses"
 workflow beyond what a plain request to Claude Code does on its own:
 
-- Drains the entire `get_pending_analyses` queue, not just one request.
+- Drains the entire `get_pending_analyses` queue, not just one request, and
+  submits a `close` or `attention` verdict for each.
 - Enriches each finding by resolving source/destination IPs to hostnames
   via `unifi-mcp-server`'s client list, when that server is configured and
   reachable (falls back to IP-only otherwise).
