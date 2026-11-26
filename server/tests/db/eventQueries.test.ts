@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { openSinkDb, type SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import {
   allClientMacs,
   auditCandidateEvents,
@@ -19,39 +19,13 @@ import {
   sourceIpEventCounts,
   topSignatures,
   topSourceIps,
-} from '../../src/db/sinkQueries.js';
-import { seededSinkDb } from '../helpers.js';
+} from '../../src/db/eventQueries.js';
+import { seededEventsDb } from '../helpers.js';
 
-function seededEventsDb(
-  rows: {
-    received_at: string;
-    category: string;
-    signature?: string | null;
-    source_ip?: string | null;
-    action?: string | null;
-    message?: string | null;
-  }[]
-): SinkDb {
-  const conn = new DatabaseSync(':memory:');
-  conn.exec(
-    `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
-     category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
-     dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
-     signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER)`
-  );
-  const stmt = conn.prepare(
-    `INSERT INTO events (received_at, category, signature, source_ip, action, message, raw, parsed)
-     VALUES (?, ?, ?, ?, ?, ?, '', 1)`
-  );
-  for (const r of rows) {
-    stmt.run(r.received_at, r.category, r.signature ?? null, r.source_ip ?? null, r.action ?? null, r.message ?? null);
-  }
-  return { conn };
-}
 
-describe('sinkQueries', () => {
+describe('eventQueries', () => {
   it('listEvents returns rows without throwing against the fixture', () => {
-    const db = openSinkDb('tests/fixtures/events.db');
+    const db: EventsDb = { conn: new DatabaseSync('tests/fixtures/events.db', { readOnly: true }) };
     const events = listEvents(db, { limit: 10 });
     expect(Array.isArray(events)).toBe(true);
   });
@@ -64,7 +38,7 @@ describe('sinkQueries', () => {
        dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
        signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER)`
     );
-    const db: SinkDb = { conn };
+    const db: EventsDb = { conn };
     expect(listEvents(db, {})).toEqual([]);
     expect(eventsOverTime(db, { sinceDays: 7 })).toEqual([]);
     expect(topSignatures(db, { sinceDays: 7, limit: 5 })).toEqual([]);
@@ -179,7 +153,7 @@ describe('auditCandidateEvents', () => {
 });
 
 describe('client queries', () => {
-  function clientDb(): SinkDb {
+  function clientDb(): EventsDb {
     const conn = new DatabaseSync(':memory:');
     conn.exec(
       `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
@@ -253,8 +227,8 @@ describe('client queries', () => {
 
 describe('countUnblockedIpsAlerts / entityActivitySummary', () => {
   const MAC = 'aa:aa:aa:aa:aa:01';
-  function activityDb(): SinkDb {
-    return seededSinkDb([
+  function activityDb(): EventsDb {
+    return seededEventsDb([
       // source IP 198.51.100.4: two unblocked (one NULL action), one blocked, one non-IPS
       { received_at: '2026-11-20T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.4', action: 'blocked', dest_ip: '192.168.1.10', dest_port: 22 },
       { received_at: '2026-11-20T02:00:00Z', category: 'ips_alert', signature: 'ET SCAN A', source_ip: '198.51.100.4', action: 'allowed', dest_ip: '192.168.1.10', dest_port: 22 },
@@ -318,7 +292,7 @@ describe('countUnblockedIpsAlerts / entityActivitySummary', () => {
   });
 
   it('caps each top list at 5', () => {
-    const db = seededSinkDb(
+    const db = seededEventsDb(
       Array.from({ length: 8 }, (_, i) => ({
         received_at: '2026-11-20T00:00:00Z',
         category: 'ips_alert',
@@ -334,13 +308,4 @@ describe('countUnblockedIpsAlerts / entityActivitySummary', () => {
     expect(s.top_counterparts).toHaveLength(5);
   });
 
-  it('client variants throw on a pre-v1.0.3 sink (no client columns); IP/signature variants do not', () => {
-    const old = seededEventsDb([
-      { received_at: '2026-11-20T00:00:00Z', category: 'ips_alert', signature: 'x', source_ip: '198.51.100.4', action: 'allowed' },
-    ]);
-    expect(() => countUnblockedIpsAlerts(old, 'client', MAC, SINCE)).toThrow();
-    expect(() => entityActivitySummary(old, 'client', MAC, SINCE)).toThrow();
-    expect(countUnblockedIpsAlerts(old, 'source_ip', '198.51.100.4', SINCE)).toBe(1);
-    expect(entityActivitySummary(old, 'source_ip', '198.51.100.4', SINCE).total).toBe(1);
-  });
 });

@@ -4,7 +4,7 @@ import {
   IGNORED_SIGNATURE_KEYS,
   splitSignatureKey,
 } from '../analysis/newEntity.js';
-import type { SinkDb } from './sinkDb.js';
+import type { EventsDb } from './eventsDb.js';
 
 export interface StoredEvent {
   id: number;
@@ -20,7 +20,7 @@ export interface StoredEvent {
   raw: string;
 }
 
-export function listEvents(db: SinkDb, opts: { since?: string; limit?: number }): StoredEvent[] {
+export function listEvents(db: EventsDb, opts: { since?: string; limit?: number }): StoredEvent[] {
   const clauses: string[] = [];
   const params: (string | number)[] = [];
   if (opts.since) {
@@ -40,7 +40,7 @@ export function listEvents(db: SinkDb, opts: { since?: string; limit?: number })
 // Recent raw events for a given source IP, most-recent first. Used as LLM
 // analysis context (spec: "relevant recent raw events pulled from events.db
 // as context") — capped low since this is prompt context, not a data dump.
-export function eventsForSourceIp(db: SinkDb, sourceIp: string, limit = 20): StoredEvent[] {
+export function eventsForSourceIp(db: EventsDb, sourceIp: string, limit = 20): StoredEvent[] {
   return db.conn
     .prepare(
       `SELECT id, received_at, category, severity, source_ip, dest_ip, dest_port, action, signature, message, raw
@@ -51,7 +51,7 @@ export function eventsForSourceIp(db: SinkDb, sourceIp: string, limit = 20): Sto
 
 // Recent raw events for a given (category, signature) pair, most-recent first.
 export function eventsForSignature(
-  db: SinkDb,
+  db: EventsDb,
   category: string,
   signature: string,
   limit = 20
@@ -65,7 +65,7 @@ export function eventsForSignature(
 }
 
 export function eventsOverTime(
-  db: SinkDb,
+  db: EventsDb,
   opts: { sinceDays: number }
 ): { day: string; category: string; count: number }[] {
   return db.conn
@@ -82,7 +82,7 @@ export function eventsOverTime(
 }
 
 export function topSignatures(
-  db: SinkDb,
+  db: EventsDb,
   opts: { sinceDays: number; limit: number }
 ): { signature: string; count: number }[] {
   return db.conn
@@ -98,7 +98,7 @@ export function topSignatures(
 }
 
 export function topSourceIps(
-  db: SinkDb,
+  db: EventsDb,
   opts: { sinceDays: number; limit: number }
 ): { source_ip: string; count: number }[] {
   return db.conn
@@ -114,7 +114,7 @@ export function topSourceIps(
 }
 
 export function severityDistribution(
-  db: SinkDb,
+  db: EventsDb,
   opts: { sinceDays: number }
 ): { severity: number | null; count: number }[] {
   return db.conn
@@ -138,7 +138,7 @@ export interface EntityEventCounts {
 // more than 20 events could otherwise let the most recent 20 stand in for
 // "every event" and hide a non-matching event outside the cap.
 export function sourceIpEventCounts(
-  db: SinkDb,
+  db: EventsDb,
   sourceIp: string,
   sinceIso: string,
   matchingWhereSql: string,
@@ -163,7 +163,7 @@ export function sourceIpEventCounts(
 }
 
 export function signatureEventCounts(
-  db: SinkDb,
+  db: EventsDb,
   category: string,
   signature: string,
   sinceIso: string,
@@ -197,7 +197,7 @@ export function signatureEventCounts(
 // window is inherently small, so fetching all of it is cheap and, unlike a
 // capped fetch, doesn't risk missing a non-matching event.
 export function auditCandidateEvents(
-  db: SinkDb,
+  db: EventsDb,
   sourceIp: string,
   sinceIso: string,
   untilIso?: string
@@ -231,7 +231,7 @@ function entityWhere(
 
 const UNBLOCKED_IPS_SQL = "category = 'ips_alert' AND (action IS NULL OR action != 'blocked')";
 
-function countWhere(db: SinkDb, whereSql: string, params: (string | number)[]): number {
+function countWhere(db: EventsDb, whereSql: string, params: (string | number)[]): number {
   return (
     db.conn.prepare(`SELECT COUNT(*) AS n FROM events WHERE ${whereSql}`).get(...params) as {
       n: number;
@@ -242,7 +242,7 @@ function countWhere(db: SinkDb, whereSql: string, params: (string | number)[]): 
 // IPS alerts for the entity since sinceIso that the gateway did not block. A
 // NULL action counts as not blocked: absence of proof isn't proof.
 export function countUnblockedIpsAlerts(
-  db: SinkDb,
+  db: EventsDb,
   entityType: Finding['entity_type'],
   entityKey: string,
   sinceIso: string
@@ -269,7 +269,7 @@ const SUMMARY_TOP_N = 5;
 // the WHERE fragment so the client variant can reuse it without this section
 // naming any client column. NULL action is reported as "unknown".
 function summarizeWhere(
-  db: SinkDb,
+  db: EventsDb,
   where: { sql: string; params: (string | number)[] },
   counterpartColumn: 'signature' | 'source_ip',
   sinceIso: string,
@@ -304,7 +304,7 @@ function summarizeWhere(
 // Counterparts are the "other side" of the entity: signatures a source IP (or
 // client) tripped, or source IPs that tripped a signature.
 export function entityActivitySummary(
-  db: SinkDb,
+  db: EventsDb,
   entityType: Finding['entity_type'],
   entityKey: string,
   sinceIso: string,
@@ -351,7 +351,7 @@ function clientOnlyWhere(): { sql: string; params: string[] } {
   };
 }
 
-export function allClientMacs(db: SinkDb): string[] {
+export function allClientMacs(db: EventsDb): string[] {
   const where = clientOnlyWhere();
   const rows = db.conn
     .prepare(`SELECT DISTINCT source_client_mac AS mac FROM events WHERE ${where.sql}`)
@@ -359,7 +359,7 @@ export function allClientMacs(db: SinkDb): string[] {
   return rows.map((r) => r.mac);
 }
 
-export function clientMacsSince(db: SinkDb, sinceIso: string): string[] {
+export function clientMacsSince(db: EventsDb, sinceIso: string): string[] {
   const where = clientOnlyWhere();
   const rows = db.conn
     .prepare(
@@ -369,7 +369,7 @@ export function clientMacsSince(db: SinkDb, sinceIso: string): string[] {
   return rows.map((r) => r.mac);
 }
 
-export function clientDayCounts(db: SinkDb, sinceIso: string): { mac: string; days: number }[] {
+export function clientDayCounts(db: EventsDb, sinceIso: string): { mac: string; days: number }[] {
   const where = clientOnlyWhere();
   return db.conn
     .prepare(
@@ -382,7 +382,7 @@ export function clientDayCounts(db: SinkDb, sinceIso: string): { mac: string; da
 // Latest client-only Security event per MAC since sinceIso, for the runner's
 // last-activity bump.
 export function clientLastActivitySince(
-  db: SinkDb,
+  db: EventsDb,
   sinceIso: string
 ): { mac: string; last_received_at: string }[] {
   const where = clientOnlyWhere();
@@ -400,7 +400,7 @@ export function clientLastActivitySince(
 // source_client_name from the row that supplies MAX(received_at), so a chatty
 // client (thousands of C2 keepalives) doesn't ship every row to JS on each
 // dashboard refresh.
-export function latestClientNames(db: SinkDb, macs: string[]): Map<string, string> {
+export function latestClientNames(db: EventsDb, macs: string[]): Map<string, string> {
   if (macs.length === 0) return new Map();
   const rows = db.conn
     .prepare(
@@ -413,7 +413,7 @@ export function latestClientNames(db: SinkDb, macs: string[]): Map<string, strin
   return new Map(rows.map((r) => [r.mac, r.name]));
 }
 
-export function eventsForClientMac(db: SinkDb, mac: string, limit = 20): ClientStoredEvent[] {
+export function eventsForClientMac(db: EventsDb, mac: string, limit = 20): ClientStoredEvent[] {
   const where = clientOnlyWhere();
   return db.conn
     .prepare(
@@ -429,7 +429,7 @@ function clientWhere(mac: string): { sql: string; params: string[] } {
   return { sql: `source_client_mac = ? AND ${where.sql}`, params: [mac, ...where.params] };
 }
 
-export function clientUnblockedIpsAlertCount(db: SinkDb, mac: string, sinceIso: string): number {
+export function clientUnblockedIpsAlertCount(db: EventsDb, mac: string, sinceIso: string): number {
   const where = clientWhere(mac);
   return countWhere(db, `${where.sql} AND received_at >= ? AND ${UNBLOCKED_IPS_SQL}`, [
     ...where.params,
@@ -438,7 +438,7 @@ export function clientUnblockedIpsAlertCount(db: SinkDb, mac: string, sinceIso: 
 }
 
 export function clientActivitySummary(
-  db: SinkDb,
+  db: EventsDb,
   mac: string,
   sinceIso: string,
   untilIso?: string

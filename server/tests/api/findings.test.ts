@@ -7,12 +7,12 @@ import { createAnalysisRequestsRouter } from '../../src/api/analysisRequests.js'
 import { createAnalysisRequest, recordAiVerdict } from '../../src/db/analysisRequestsStore.js';
 import { updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { openLensDb } from '../../src/db/lensDb.js';
-import type { SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import { createFindingsRouter } from '../../src/api/findings.js';
 
-function seededSinkDb(
+function seededEventsDb(
   rows: { received_at: string; category: string; signature?: string | null; source_ip?: string | null; action?: string | null }[]
-): SinkDb {
+): EventsDb {
   const conn = new DatabaseSync(':memory:');
   conn.exec(
     `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
@@ -44,10 +44,10 @@ const closed = (by: 'rule' | 'ai' | 'human' | 'system', reason: string, at = new
   closed_at: at,
 });
 
-function appFor(db: Db, sinkDb: SinkDb | null = null) {
+function appFor(db: Db, eventsDb: EventsDb | null = null) {
   const app = express();
   app.use(express.json());
-  app.use('/api', createFindingsRouter(db, sinkDb));
+  app.use('/api', createFindingsRouter(db, eventsDb));
   app.use('/api', createAnalysisRequestsRouter(db));
   return app;
 }
@@ -244,7 +244,7 @@ describe('findings API', () => {
     expect((await request(app).post(`/api/findings/${f.id}/analyze`)).status).toBe(404);
   });
 
-  it('list, summary and queue work with sinkDb = null', async () => {
+  it('list, summary and queue work with eventsDb = null', async () => {
     const app = appFor(openLensDb(':memory:'), null);
     expect((await request(app).get('/api/findings')).status).toBe(200);
     expect((await request(app).get('/api/findings-summary')).status).toBe(200);
@@ -256,14 +256,14 @@ describe('GET /api/findings/:id/activity', () => {
   it('returns raw events for a source_ip finding', async () => {
     const lensDb = openLensDb(':memory:');
     const finding = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-31T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '1.2.3.4', action: 'blocked' },
       { received_at: '2026-08-31T02:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '9.9.9.9', action: 'blocked' },
     ]);
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, sinkDb));
+    app.use('/api', createFindingsRouter(lensDb, eventsDb));
 
     const res = await request(app).get(`/api/findings/${finding.id}/activity`);
     expect(res.status).toBe(200);
@@ -277,14 +277,14 @@ describe('GET /api/findings/:id/activity', () => {
       lensDb,
       applyTrigger(null, 'new_signature', 't0', 'signature', 'ips_alert|ET DROP Foo')
     );
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-31T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '1.2.3.4', action: 'blocked' },
       { received_at: '2026-08-31T02:00:00Z', category: 'ips_alert', signature: 'ET MALWARE Bar', source_ip: '1.2.3.4', action: 'blocked' },
     ]);
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, sinkDb));
+    app.use('/api', createFindingsRouter(lensDb, eventsDb));
 
     const res = await request(app).get(`/api/findings/${finding.id}/activity`);
     expect(res.status).toBe(200);
@@ -294,30 +294,20 @@ describe('GET /api/findings/:id/activity', () => {
 
   it('returns 404 for a nonexistent finding', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([]);
+    const eventsDb = seededEventsDb([]);
     const app = express();
     app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, sinkDb));
+    app.use('/api', createFindingsRouter(lensDb, eventsDb));
 
     const res = await request(app).get('/api/findings/999/activity');
     expect(res.status).toBe(404);
   });
 
-  it('returns 503 when the sink DB is unavailable', async () => {
-    const lensDb = openLensDb(':memory:');
-    const finding = upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
-    const app = express();
-    app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, null));
-
-    const res = await request(app).get(`/api/findings/${finding.id}/activity`);
-    expect(res.status).toBe(503);
-  });
 });
 
 describe('findings API — client findings', () => {
   const MAC = 'aa:aa:aa:aa:aa:01';
-  function clientSinkDb(rows: { mac: string; name: string | null; source_ip?: string | null; category?: string }[]): SinkDb {
+  function clientSinkDb(rows: { mac: string; name: string | null; source_ip?: string | null; category?: string }[]): EventsDb {
     const conn = new DatabaseSync(':memory:');
     conn.exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
   category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
@@ -331,13 +321,13 @@ describe('findings API — client findings', () => {
     for (const r of rows) stmt.run(r.category ?? 'ips_alert', r.source_ip ?? null, r.mac, r.name);
     return { conn };
   }
-  function appWith(sinkDb: SinkDb | null) {
+  function appWith(eventsDb: EventsDb | null) {
     const lensDb = openLensDb(':memory:');
     const client = upsertFinding(lensDb, applyTrigger(null, 'new_client', 't0', 'client', MAC));
     upsertFinding(lensDb, applyTrigger(null, 'internal_source', 't0', 'source_ip', '1.2.3.4'));
     const app = express();
     app.use(express.json());
-    app.use('/api', createFindingsRouter(lensDb, sinkDb));
+    app.use('/api', createFindingsRouter(lensDb, eventsDb));
     return { app, client };
   }
 
@@ -355,15 +345,8 @@ describe('findings API — client findings', () => {
     expect(pagedClient.display_name).toBe('tranquility');
   });
 
-  it('returns display_name null when the sink is unavailable', async () => {
-    const { app } = appWith(null);
-    const res = await request(app).get('/api/findings');
-    expect(res.status).toBe(200);
-    expect(res.body.find((f: { entity_type: string }) => f.entity_type === 'client').display_name).toBeNull();
-  });
-
-  it('returns display_name null when the name lookup fails (pre-v1.0.3 sink)', async () => {
-    const { app } = appWith(seededSinkDb([]));
+  it('returns display_name null when the name lookup fails', async () => {
+    const { app } = appWith(seededEventsDb([]));
     const res = await request(app).get('/api/findings');
     expect(res.status).toBe(200);
     expect(res.body.find((f: { entity_type: string }) => f.entity_type === 'client').display_name).toBeNull();

@@ -20,7 +20,7 @@ async function connect(lensDb: LensDb) {
   const server = createLensMcpServer(
     {
       lensDb,
-      sinkDb: null,
+      eventsDb: null,
       unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
       homelabServices: {},
     },

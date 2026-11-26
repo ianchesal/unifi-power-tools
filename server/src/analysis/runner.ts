@@ -1,3 +1,10 @@
+import {
+  allClientMacs,
+  clientDayCounts,
+  clientLastActivitySince,
+  clientMacsSince,
+} from '../db/eventQueries.js';
+import type { EventsDb } from '../db/eventsDb.js';
 import { addHistory } from '../db/findingHistoryStore.js';
 import {
   bumpLastActivity,
@@ -12,13 +19,6 @@ import {
   upsertFinding,
 } from '../db/findingsStore.js';
 import type { LensDb } from '../db/lensDb.js';
-import type { SinkDb } from '../db/sinkDb.js';
-import {
-  allClientMacs,
-  clientDayCounts,
-  clientLastActivitySince,
-  clientMacsSince,
-} from '../db/sinkQueries.js';
 import type { HomelabRegistry } from '../enrichment/homelabServices.js';
 import { computeBaseline, isAnomalous } from './baseline.js';
 import { isInternalSource } from './cidr.js';
@@ -49,7 +49,7 @@ import {
 import { isSustained, REPEAT_OFFENDER_WINDOW_DAYS } from './repeatOffender.js';
 
 export interface RunnerDeps {
-  sinkDb: SinkDb;
+  eventsDb: EventsDb;
   lensDb: LensDb;
   lanCidrs: string[];
   trustedAdminNames: string[];
@@ -70,8 +70,8 @@ interface RecentEventRow {
   source_ip: string | null;
 }
 
-function recentEvents(sinkDb: SinkDb, sinceIso: string): RecentEventRow[] {
-  const rows = sinkDb.conn
+function recentEvents(eventsDb: EventsDb, sinceIso: string): RecentEventRow[] {
+  const rows = eventsDb.conn
     .prepare(
       'SELECT received_at, category, signature, source_ip FROM events WHERE received_at >= ?'
     )
@@ -182,7 +182,7 @@ export function runHourlyChecks(
 ): { findingsTouched: number } {
   const nowIso = now.toISOString();
   const sinceIso = new Date(now.getTime() - NEW_ENTITY_WINDOW_HOURS * 3600 * 1000).toISOString();
-  const events = recentEvents(deps.sinkDb, sinceIso);
+  const events = recentEvents(deps.eventsDb, sinceIso);
   let touched = 0;
 
   // New-signature / new-source-ip
@@ -274,7 +274,7 @@ export function runHourlyChecks(
   // this check fails alone.
   touched += runCheck('client', () => {
     let count = 0;
-    const newMacs = detectNewClients(allClientMacs(deps.sinkDb), seenClientMacs(deps.lensDb));
+    const newMacs = detectNewClients(allClientMacs(deps.eventsDb), seenClientMacs(deps.lensDb));
     for (const mac of newMacs) {
       const withNew = recordTrigger(
         deps,
@@ -302,7 +302,7 @@ export function runHourlyChecks(
       count++;
     }
     const newMacSet = new Set(newMacs);
-    for (const mac of clientMacsSince(deps.sinkDb, sinceIso)) {
+    for (const mac of clientMacsSince(deps.eventsDb, sinceIso)) {
       if (newMacSet.has(mac)) continue;
       const r = recordTrigger(
         deps,
@@ -326,7 +326,7 @@ export function runHourlyChecks(
     const windowStart = new Date(
       now.getTime() - REPEAT_OFFENDER_WINDOW_DAYS * 24 * 3600 * 1000
     ).toISOString();
-    const ipDayCounts = deps.sinkDb.conn
+    const ipDayCounts = deps.eventsDb.conn
       .prepare(
         `SELECT source_ip, COUNT(DISTINCT date(received_at)) as days FROM events
          WHERE received_at >= ? AND source_ip IS NOT NULL GROUP BY source_ip`
@@ -374,7 +374,7 @@ export function runHourlyChecks(
     const windowStart = new Date(
       now.getTime() - REPEAT_OFFENDER_WINDOW_DAYS * 24 * 3600 * 1000
     ).toISOString();
-    const macDayCounts = clientDayCounts(deps.sinkDb, windowStart);
+    const macDayCounts = clientDayCounts(deps.eventsDb, windowStart);
     const activeSustainedMacs = new Set(
       macDayCounts.filter((r) => isSustained(r.days)).map((r) => r.mac)
     );
@@ -422,7 +422,7 @@ export function runHourlyChecks(
   // Separate from 'last-activity' so an old sink (no client columns) loses
   // only client activity.
   runCheck('last-activity-client', () => {
-    for (const { mac, last_received_at } of clientLastActivitySince(deps.sinkDb, sinceIso)) {
+    for (const { mac, last_received_at } of clientLastActivitySince(deps.eventsDb, sinceIso)) {
       bumpLastActivity(deps.lensDb, 'client', mac, last_received_at);
     }
     return 0;
@@ -455,7 +455,7 @@ export function runDailyAnomalyCheck(
     )
       .toISOString()
       .slice(0, 10);
-    const historicalCounts = deps.sinkDb.conn
+    const historicalCounts = deps.eventsDb.conn
       .prepare(
         `SELECT date(received_at) as day, category, signature, COUNT(*) as count FROM events
        WHERE date(received_at) >= ? AND date(received_at) < ? AND signature IS NOT NULL AND signature != ''
@@ -476,7 +476,7 @@ export function runDailyAnomalyCheck(
         .run(row.category, row.signature, row.day, row.count);
     }
 
-    const allDayCounts = deps.sinkDb.conn
+    const allDayCounts = deps.eventsDb.conn
       .prepare(
         `SELECT category, signature, COUNT(*) as count FROM events
        WHERE date(received_at) = ? AND signature IS NOT NULL AND signature != ''

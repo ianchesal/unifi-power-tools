@@ -1,9 +1,8 @@
-import { DatabaseSync } from 'node:sqlite';
 import type { RunnerDeps } from '../src/analysis/runner.js';
 import type { LensDb } from '../src/db/lensDb.js';
-import type { SinkDb } from '../src/db/sinkDb.js';
+import { type EventsDb, openEventsDb } from '../src/db/eventsDb.js';
 
-export interface SinkEventRow {
+export interface EventRowFixture {
   received_at: string;
   category: string;
   signature?: string | null;
@@ -16,17 +15,9 @@ export interface SinkEventRow {
   source_client_name?: string | null;
 }
 
-// In-memory sink DB with the full sink v1.0.3 `events` schema (every column in
-// sinkDb.ts's EXPECTED_COLUMNS, including the client-identity columns).
-export function seededSinkDb(rows: SinkEventRow[]): SinkDb {
-  const conn = new DatabaseSync(':memory:');
-  conn.exec(
-    `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
-     category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
-     dest_ip TEXT, source_port INTEGER, dest_port INTEGER, protocol TEXT, action TEXT,
-     signature TEXT, message TEXT, device_host TEXT, raw TEXT, parsed INTEGER,
-     source_client_name TEXT, source_client_mac TEXT, dest_client_name TEXT, dest_client_mac TEXT)`
-  );
+// In-memory events DB built by the real migrations, so tests track the real schema.
+export function seededEventsDb(rows: EventRowFixture[]): EventsDb {
+  const { conn } = openEventsDb(':memory:').writer;
   const stmt = conn.prepare(
     `INSERT INTO events (received_at, category, signature, source_ip, action, message,
                          dest_ip, dest_port, source_client_mac, source_client_name, raw, parsed)
@@ -50,12 +41,12 @@ export function seededSinkDb(rows: SinkEventRow[]): SinkDb {
 }
 
 export function runnerDeps(
-  sinkDb: SinkDb,
+  eventsDb: EventsDb,
   lensDb: LensDb,
   overrides: Partial<RunnerDeps> = {}
 ): RunnerDeps {
   return {
-    sinkDb,
+    eventsDb,
     lensDb,
     lanCidrs: [],
     trustedAdminNames: [],

@@ -2,7 +2,7 @@ import {
   auditCandidateEvents,
   signatureEventCounts,
   sourceIpEventCounts,
-} from '../db/sinkQueries.js';
+} from '../db/eventQueries.js';
 import type { Finding } from './findings.js';
 import { isIgnoredSignature, splitSignatureKey } from './newEntity.js';
 import {
@@ -73,14 +73,19 @@ export function matchRules(
 
   if (finding.entity_type === 'source_ip') {
     if (allowed('admin_login') && deps.trustedAdminNames.length > 0) {
-      const auditEvents = auditCandidateEvents(deps.sinkDb, finding.entity_key, sinceIso, untilIso);
+      const auditEvents = auditCandidateEvents(
+        deps.eventsDb,
+        finding.entity_key,
+        sinceIso,
+        untilIso
+      );
       verdict = tryAdminAuditLoginRule(auditEvents, deps.trustedAdminNames);
       if (verdict) rule = 'admin_login';
     }
 
     if (!verdict && allowed('operational_noise')) {
       const opCounts = sourceIpEventCounts(
-        deps.sinkDb,
+        deps.eventsDb,
         finding.entity_key,
         sinceIso,
         `category IN (${NON_SECURITY_OPERATIONAL_CATEGORIES.map(() => '?').join(',')})`,
@@ -93,7 +98,7 @@ export function matchRules(
 
     if (!verdict && allowed('reputation_blocklist') && prefixClause) {
       const blockCounts = sourceIpEventCounts(
-        deps.sinkDb,
+        deps.eventsDb,
         finding.entity_key,
         sinceIso,
         `category = 'ips_alert' AND action = 'blocked' AND (${prefixClause})`,
@@ -116,7 +121,7 @@ export function matchRules(
       for (const [hostIp, host] of Object.entries(deps.homelabServices ?? {})) {
         if (verdict || !host.wanExposed) continue;
         const exposedCounts = sourceIpEventCounts(
-          deps.sinkDb,
+          deps.eventsDb,
           finding.entity_key,
           sinceIso,
           `category = 'ips_alert' AND action = 'blocked' AND dest_ip = ?`,
@@ -150,7 +155,7 @@ export function matchRules(
       // with the other rules' completeness check (and guards the total=0
       // case via isComplete).
       const opCounts = signatureEventCounts(
-        deps.sinkDb,
+        deps.eventsDb,
         category,
         signature,
         sinceIso,
@@ -172,7 +177,7 @@ export function matchRules(
       // different, non-operational category set. See ruleTriage.ts for why
       // 'audit' is deliberately excluded from this list.
       const lowSignalCounts = signatureEventCounts(
-        deps.sinkDb,
+        deps.eventsDb,
         category,
         signature,
         sinceIso,
@@ -186,7 +191,7 @@ export function matchRules(
 
     if (!verdict && allowed('reputation_blocklist') && category === 'ips_alert' && prefixClause) {
       const blockCounts = signatureEventCounts(
-        deps.sinkDb,
+        deps.eventsDb,
         category,
         signature,
         sinceIso,
@@ -211,7 +216,7 @@ export function matchRules(
       for (const { hostIp, host, service } of hostServicePairs) {
         if (verdict) break;
         const counts = signatureEventCounts(
-          deps.sinkDb,
+          deps.eventsDb,
           category,
           signature,
           sinceIso,

@@ -10,24 +10,22 @@ import { createEventsRouter } from './api/events.js';
 import { createFindingsRouter } from './api/findings.js';
 import { createPlaybookRouter } from './api/playbook.js';
 import type { Config } from './config.js';
+import type { EventsDb } from './db/eventsDb.js';
 import type { LensDb } from './db/lensDb.js';
-import type { SinkDb } from './db/sinkDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
 import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
+import type { SyslogListener } from './ingest/listener.js';
 import { createLensMcpServer } from './mcp/server.js';
 
-export interface SchemaCheckResult {
-  ok: boolean;
-  missingColumns: string[];
+export interface AppDeps {
+  eventsDb: EventsDb;
+  lensDb: LensDb;
+  runnerDeps: RunnerDeps;
+  listener: Pick<SyslogListener, 'bound' | 'droppedCount'>;
 }
 
-export function createApp(
-  sinkDb: SinkDb | null,
-  lensDb: LensDb,
-  runnerDeps: RunnerDeps | null,
-  config: Config,
-  schemaCheck: SchemaCheckResult | null = null
-) {
+export function createApp(deps: AppDeps, config: Config) {
+  const { eventsDb, lensDb, runnerDeps, listener } = deps;
   const app = express();
   app.use(
     rateLimit({
@@ -52,50 +50,38 @@ export function createApp(
   };
 
   app.get('/health', (_req, res) => {
-    const schemaOk = !sinkDb || !schemaCheck || schemaCheck.ok;
-    const status = sinkDb && schemaOk ? 'ok' : 'degraded';
-    const body: {
-      status: 'ok' | 'degraded';
-      sinkDb: 'available' | 'unavailable';
-      schema: 'ok' | 'mismatch' | 'unknown';
-      missingColumns?: string[];
-    } = {
-      status,
-      sinkDb: sinkDb ? 'available' : 'unavailable',
-      schema: !sinkDb ? 'unknown' : schemaCheck ? (schemaCheck.ok ? 'ok' : 'mismatch') : 'unknown',
-    };
-    if (sinkDb && schemaCheck && !schemaCheck.ok) {
-      body.missingColumns = schemaCheck.missingColumns;
+    let eventsDbStatus: 'ok' | 'error' = 'ok';
+    try {
+      eventsDb.conn.prepare('SELECT 1').get();
+    } catch {
+      eventsDbStatus = 'error';
     }
-    res.json(body);
+    const bound = listener.bound();
+    res.json({
+      status: bound && eventsDbStatus === 'ok' ? 'ok' : 'degraded',
+      syslog: { bound, droppedMessages: listener.droppedCount() },
+      eventsDb: eventsDbStatus,
+    });
   });
 
-  app.use('/api', createEventsRouter(sinkDb));
-  app.use('/api', createFindingsRouter(lensDb, sinkDb));
+  app.use('/api', createEventsRouter(eventsDb));
+  app.use('/api', createFindingsRouter(lensDb, eventsDb));
   app.use('/api', createAnalysisRequestsRouter(lensDb));
   app.use('/api/playbook', createPlaybookRouter(lensDb, homelabServices));
 
   app.post('/api/analysis/run', (_req, res) => {
-    if (!runnerDeps) {
-      res.status(503).json({ error: 'Sink DB is unavailable; analysis cannot run.' });
-      return;
-    }
     const result = runHourlyChecks(runnerDeps);
     res.json(result);
   });
 
   app.post('/api/admin/backfill-rule-triage', (_req, res) => {
-    if (!runnerDeps) {
-      res.status(503).json({ error: 'Sink DB is unavailable; backfill cannot run.' });
-      return;
-    }
     const result = runRuleTriageBackfill(runnerDeps);
     res.json(result);
   });
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
     const mcpServer = createLensMcpServer(
-      { lensDb, sinkDb, unifiMcp, homelabServices },
+      { lensDb, eventsDb, unifiMcp, homelabServices },
       { trustedAdminNames: config.trustedAdminNames }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

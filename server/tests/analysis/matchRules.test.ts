@@ -3,7 +3,7 @@ import { applyTrigger, type Finding } from '../../src/analysis/findings.js';
 import { matchRules } from '../../src/analysis/matchRules.js';
 import { upsertFinding } from '../../src/db/findingsStore.js';
 import { openLensDb } from '../../src/db/lensDb.js';
-import { runnerDeps, seededSinkDb } from '../helpers.js';
+import { runnerDeps, seededEventsDb } from '../helpers.js';
 
 const SINCE = '2026-11-24T00:00:00.000Z';
 const AT = '2026-11-24T12:00:00.000Z';
@@ -31,13 +31,13 @@ const blocked = (signature = 'ET DROP Dshield Block') => ({
 describe('matchRules', () => {
   it('matches reputation_blocklist when every event is a blocked safe-prefix hit', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked(), blocked('ET CINS Active Threat')]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked(), blocked('ET CINS Active Threat')]), lensDb);
     expect(matchRules(deps, ipFinding(lensDb), SINCE)?.rule).toBe('reputation_blocklist');
   });
 
   it('returns the verdict alongside the rule', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked()]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked()]), lensDb);
     const match = matchRules(deps, ipFinding(lensDb), SINCE);
     expect(match?.verdict.riskLevel).toBe('low');
     expect(match?.verdict.recommendation).toBeTruthy();
@@ -46,7 +46,7 @@ describe('matchRules', () => {
   it('returns null when one event falls outside the rule', () => {
     const lensDb = openLensDb(':memory:');
     const deps = runnerDeps(
-      seededSinkDb([blocked(), { ...blocked('ET SCAN Nmap'), action: 'alert' }]),
+      seededEventsDb([blocked(), { ...blocked('ET SCAN Nmap'), action: 'alert' }]),
       lensDb
     );
     expect(matchRules(deps, ipFinding(lensDb), SINCE)).toBeNull();
@@ -54,19 +54,19 @@ describe('matchRules', () => {
 
   it('returns null when the window has no events (total 0)', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([]), lensDb);
+    const deps = runnerDeps(seededEventsDb([]), lensDb);
     expect(matchRules(deps, ipFinding(lensDb), SINCE)).toBeNull();
   });
 
   it('respects the untilIso upper bound', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked()]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked()]), lensDb);
     expect(matchRules(deps, ipFinding(lensDb), SINCE, '2026-11-24T06:00:00.000Z')).toBeNull();
   });
 
   it('a finding carrying internal_source can only match operational_noise', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked()]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked()]), lensDb);
     // Without the flag the same events match reputation_blocklist.
     expect(matchRules(deps, ipFinding(lensDb), SINCE)?.rule).toBe('reputation_blocklist');
     const internal = { ...ipFinding(lensDb, 'internal') };
@@ -77,7 +77,7 @@ describe('matchRules', () => {
   it('internal-source restriction still allows operational_noise', () => {
     const lensDb = openLensDb(':memory:');
     const deps = runnerDeps(
-      seededSinkDb([{ received_at: AT, category: 'internet_and_wan', signature: null, source_ip: IP }]),
+      seededEventsDb([{ received_at: AT, category: 'internet_and_wan', signature: null, source_ip: IP }]),
       lensDb
     );
     const f = ipFinding(lensDb, 'internal');
@@ -87,7 +87,7 @@ describe('matchRules', () => {
   it('intersects allowedRules with operational_noise for internal findings', () => {
     const lensDb = openLensDb(':memory:');
     const deps = runnerDeps(
-      seededSinkDb([{ received_at: AT, category: 'internet_and_wan', signature: null, source_ip: IP }]),
+      seededEventsDb([{ received_at: AT, category: 'internet_and_wan', signature: null, source_ip: IP }]),
       lensDb
     );
     const f = ipFinding(lensDb, 'internal');
@@ -99,7 +99,7 @@ describe('matchRules', () => {
 
   it('honours allowedRules for non-internal findings', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked()]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked()]), lensDb);
     expect(
       matchRules(deps, ipFinding(lensDb), SINCE, undefined, ['operational_noise'])
     ).toBeNull();
@@ -109,7 +109,7 @@ describe('matchRules', () => {
     const lensDb = openLensDb(':memory:');
     const mac = 'aa:bb:cc:00:11:22';
     const deps = runnerDeps(
-      seededSinkDb([
+      seededEventsDb([
         {
           received_at: AT,
           category: 'ips_alert',
@@ -129,7 +129,7 @@ describe('matchRules', () => {
 
   it('matches a signature finding via ignored_signature', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([]), lensDb);
+    const deps = runnerDeps(seededEventsDb([]), lensDb);
     const f = upsertFinding(
       lensDb,
       applyTrigger(null, 'new_signature', AT, 'signature', 'siteactivity|2154')
@@ -139,7 +139,7 @@ describe('matchRules', () => {
 
   it('is query-only: no analysis rows or status changes', () => {
     const lensDb = openLensDb(':memory:');
-    const deps = runnerDeps(seededSinkDb([blocked()]), lensDb);
+    const deps = runnerDeps(seededEventsDb([blocked()]), lensDb);
     const f = ipFinding(lensDb);
     expect(matchRules(deps, f, SINCE)).not.toBeNull();
     const rows = lensDb.conn.prepare('SELECT COUNT(*) AS n FROM analysis_requests').get() as {

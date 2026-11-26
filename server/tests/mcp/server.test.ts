@@ -3,23 +3,23 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import { humanChange, listEntries } from '../../src/db/playbookStore.js';
-import type { SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import { assemblePlaybook } from '../../src/mcp/playbook/assemble.js';
 import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
 import { createLensMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
-import { seededSinkDb } from '../helpers.js';
+import { seededEventsDb } from '../helpers.js';
 
 async function connect({
-  sinkDb,
+  eventsDb,
   lensDb = openLensDb(':memory:'),
 }: {
-  sinkDb: SinkDb | null;
+  eventsDb: EventsDb | null;
   lensDb?: LensDb;
 }) {
   const server = createLensMcpServer({
     lensDb,
-    sinkDb,
+    eventsDb,
     unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   }, { trustedAdminNames: ['alice'] });
@@ -31,7 +31,7 @@ async function connect({
 
 describe('lens MCP server', () => {
   it('serves instructions that point at the triage prompt and get_playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const text = client.getInstructions();
     expect(text).toBe(SERVER_INSTRUCTIONS);
     expect(text).toMatch(/triage/);
@@ -39,7 +39,7 @@ describe('lens MCP server', () => {
   });
 
   it('triage prompt returns the assembled playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     expect((await client.listPrompts()).prompts.map((p) => p.name)).toContain('triage');
     const res = await client.getPrompt({ name: 'triage' });
     expect(res.messages).toHaveLength(1);
@@ -48,7 +48,7 @@ describe('lens MCP server', () => {
   });
 
   it('get_playbook returns the same text', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
@@ -56,7 +56,7 @@ describe('lens MCP server', () => {
   });
 
   it('serves the configured trusted admins in the playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
@@ -64,7 +64,7 @@ describe('lens MCP server', () => {
   });
 
   it('still serves the playbook with no sink DB (degraded mode)', async () => {
-    const client = await connect({ sinkDb: null });
+    const client = await connect({ eventsDb: null });
     expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
     expect((await client.getPrompt({ name: 'triage' })).messages).toHaveLength(1);
   });
@@ -78,7 +78,7 @@ describe('lens MCP server', () => {
 
   it('serves an entry accepted after the server was built', async () => {
     const lensDb = openLensDb(':memory:');
-    const client = await connect({ sinkDb: seededSinkDb([]), lensDb });
+    const client = await connect({ eventsDb: seededEventsDb([]), lensDb });
     expect(await playbookText(client)).not.toContain('### [');
 
     const { entry } = humanChange(
@@ -103,13 +103,13 @@ describe('lens MCP server', () => {
       { op: 'edit', entry_id: second.id, title: 'Mine', body: 'my text' },
       '2026-01-02T00:00:00.000Z'
     );
-    const text = await playbookText(await connect({ sinkDb: null, lensDb }));
+    const text = await playbookText(await connect({ eventsDb: null, lensDb }));
     expect(text).toContain(`### [${first.id}] ${first.title} (default)\n\n`);
     expect(text).toContain(`### [${second.id}] Mine\n\n`);
   });
 
   it('every lens tool the playbook names is registered', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
     const named = new Set(
       [...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])

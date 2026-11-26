@@ -11,7 +11,11 @@ const DEFAULT_SAFE_SIGNATURE_PREFIXES = [
 export interface Config {
   port: number;
   host: string;
-  sinkDbPath: string;
+  eventsDbPath: string;
+  retentionDays: number;
+  syslogUdpPort: number;
+  syslogBindAddress: string;
+  maxMessageBytes: number;
   lensDbPath: string;
   lanCidrs: string[];
   unifiMcpServerUrl: string | null;
@@ -41,10 +45,6 @@ function parseCommaList(raw: string | undefined): string[] {
 }
 
 export function loadConfig(): Config {
-  if (!process.env.SINK_DB_PATH?.trim()) {
-    throw new Error('Missing required environment variable: SINK_DB_PATH');
-  }
-
   if (!process.env.MCP_SECRET?.trim()) {
     throw new Error('Missing required environment variable: MCP_SECRET');
   }
@@ -60,7 +60,11 @@ export function loadConfig(): Config {
   return {
     port: parseIntEnv('PORT', 3002),
     host: process.env.HOST ?? '127.0.0.1',
-    sinkDbPath: process.env.SINK_DB_PATH,
+    eventsDbPath: process.env.EVENTS_DB_PATH?.trim() || './data/events.db',
+    retentionDays: parseIntEnv('RETENTION_DAYS', 90),
+    syslogUdpPort: parseIntEnv('SYSLOG_UDP_PORT', 10514),
+    syslogBindAddress: process.env.SYSLOG_BIND_ADDRESS?.trim() || '0.0.0.0',
+    maxMessageBytes: parseIntEnv('MAX_MESSAGE_BYTES', 16384),
     lensDbPath: process.env.LENS_DB_PATH ?? './data/lens.db',
     lanCidrs,
     unifiMcpServerUrl: process.env.UNIFI_MCP_SERVER_URL?.trim() || null,

@@ -7,9 +7,9 @@ import {
   getPendingAnalysisRequests,
   updateRequestContext,
 } from '../db/analysisRequestsStore.js';
+import { countUnblockedIpsAlerts } from '../db/eventQueries.js';
 import { getFindingById } from '../db/findingsStore.js';
 import { activeEntryIds, operatorBackedEntryIds } from '../db/playbookStore.js';
-import { countUnblockedIpsAlerts } from '../db/sinkQueries.js';
 import { type AnalysisDeps, buildAnalysisContext } from './context.js';
 
 export function toolResult(data: unknown) {
@@ -25,7 +25,7 @@ export function toolError(err: unknown) {
 }
 
 export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): void {
-  const { lensDb, sinkDb } = deps;
+  const { lensDb, eventsDb } = deps;
 
   server.tool(
     'get_pending_analyses',
@@ -79,16 +79,16 @@ export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): vo
         const request = getAnalysisRequest(lensDb, id);
         const finding = request ? getFindingById(lensDb, request.finding_id) : null;
         let unblocked: number | null = null;
-        if (sinkDb && finding) {
+        if (finding) {
           try {
             unblocked = countUnblockedIpsAlerts(
-              sinkDb,
+              eventsDb,
               finding.entity_type,
               finding.entity_key,
               decisionWindowStart(finding)
             );
           } catch (err) {
-            // e.g. a pre-v1.0.3 sink for a client finding: treat as unavailable.
+            // A failed query is treated as unavailable (the guardrail fails closed).
             console.error('Unblocked IPS alert count failed:', err);
           }
         }

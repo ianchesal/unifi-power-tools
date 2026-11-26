@@ -5,7 +5,6 @@ describe('loadConfig', () => {
   const savedEnv = { ...process.env };
 
   beforeEach(() => {
-    process.env.SINK_DB_PATH = '/tmp/events.db';
     process.env.MCP_SECRET = 'test-secret';
   });
 
@@ -36,9 +35,26 @@ describe('loadConfig', () => {
     expect(config.lanCidrs).toEqual(['10.0.0.0/8', '192.168.1.0/24']);
   });
 
-  it('throws when SINK_DB_PATH is missing', () => {
-    delete process.env.SINK_DB_PATH;
-    expect(() => loadConfig()).toThrow(/SINK_DB_PATH/);
+  it('applies events DB and syslog defaults', () => {
+    for (const k of ['EVENTS_DB_PATH', 'RETENTION_DAYS', 'SYSLOG_UDP_PORT', 'SYSLOG_BIND_ADDRESS', 'MAX_MESSAGE_BYTES']) {
+      delete process.env[k];
+    }
+    const config = loadConfig();
+    expect(config.eventsDbPath).toBe('./data/events.db');
+    expect(config.retentionDays).toBe(90);
+    expect(config.syslogUdpPort).toBe(10514);
+    expect(config.syslogBindAddress).toBe('0.0.0.0');
+    expect(config.maxMessageBytes).toBe(16384);
+  });
+
+  it('reads EVENTS_DB_PATH and the syslog settings', () => {
+    process.env.EVENTS_DB_PATH = '/data/events.db';
+    process.env.RETENTION_DAYS = '30';
+    process.env.SYSLOG_UDP_PORT = '5514';
+    const config = loadConfig();
+    expect(config.eventsDbPath).toBe('/data/events.db');
+    expect(config.retentionDays).toBe(30);
+    expect(config.syslogUdpPort).toBe(5514);
   });
 
   it('throws when MCP_SECRET is missing', () => {
