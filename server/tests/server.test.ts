@@ -5,6 +5,7 @@ import type { Config } from '../src/config.js';
 import { type EventsDb, openEventsDb } from '../src/db/eventsDb.js';
 import { openLensDb } from '../src/db/lensDb.js';
 import { type AppDeps, createApp } from '../src/server.js';
+import { stubUnifiClient } from './helpers.js';
 
 export const baseConfig = {
   port: 3002,
@@ -38,7 +39,7 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
     safeSignaturePrefixes: ['ET DROP'],
     homelabServices: {},
   };
-  return { eventsDb, lensDb, runnerDeps, listener: boundListener, ...overrides };
+  return { eventsDb, lensDb, runnerDeps, listener: boundListener, unifiClient: null, ...overrides };
 }
 
 describe('createApp /health', () => {
@@ -73,6 +74,49 @@ describe('createApp /health', () => {
       '/health'
     );
     expect(res.body).toMatchObject({ status: 'degraded', eventsDb: 'error' });
+  });
+});
+
+describe('createApp /ready', () => {
+  it('reports unifi not_configured with 200 when UniFi is off', async () => {
+    const res = await request(createApp(deps(), baseConfig)).get('/ready');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'ok', eventsDb: 'ok', unifi: 'not_configured' });
+  });
+
+  it('reports unifi ok when stat/sysinfo answers', async () => {
+    const paths: string[] = [];
+    const unifiClient = { ...stubUnifiClient, get: async (p: string) => (paths.push(p), []) };
+    const res = await request(createApp(deps({ unifiClient }), baseConfig)).get('/ready');
+    expect(res.status).toBe(200);
+    expect(res.body.unifi).toBe('ok');
+    expect(paths).toEqual(['stat/sysinfo']);
+  });
+
+  it('reports unifi unavailable but stays 200 when UniFi is down', async () => {
+    const unifiClient = {
+      ...stubUnifiClient,
+      get: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    };
+    const res = await request(createApp(deps({ unifiClient }), baseConfig)).get('/ready');
+    expect(res.status).toBe(200);
+    expect(res.body.unifi).toBe('unavailable');
+  });
+
+  it('is 503 when the syslog listener is not bound', async () => {
+    const app = createApp(deps({ listener: { bound: () => false, droppedCount: () => 0 } }), baseConfig);
+    const res = await request(app).get('/ready');
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+  });
+
+  it('is 503 when the events DB query fails', async () => {
+    const opened = openEventsDb(':memory:');
+    opened.close();
+    const res = await request(createApp(deps({ eventsDb: opened.reader }), baseConfig)).get('/ready');
+    expect(res.status).toBe(503);
   });
 });
 

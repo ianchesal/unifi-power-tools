@@ -1,6 +1,7 @@
 import type { RunnerDeps } from '../src/analysis/runner.js';
 import type { LensDb } from '../src/db/lensDb.js';
 import { type EventsDb, openEventsDb } from '../src/db/eventsDb.js';
+import type { IUnifiClient } from '../src/unifi/client.js';
 
 export interface EventRowFixture {
   received_at: string;
@@ -54,3 +55,18 @@ export function runnerDeps(
     ...overrides,
   };
 }
+
+// An IUnifiClient that answers every call with an empty result.
+export const stubUnifiClient: IUnifiClient = {
+  get: async () => [],
+  getOne: async () => ({}) as never,
+  post: async () => [],
+  put: async () => [],
+  delete: async () => {},
+  cmd: async () => {},
+  v2get: async () => [],
+  v2getOne: async () => ({}) as never,
+  v2post: async () => ({}) as never,
+  v2put: async () => ({}) as never,
+  v2delete: async () => {},
+};

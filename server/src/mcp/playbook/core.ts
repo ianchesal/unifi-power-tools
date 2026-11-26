@@ -15,6 +15,10 @@
 //   regular interval counts as C2-like even without a malware-family name;
 // - the trusted-admin rule covers console logins *and* admin account changes, and
 //   points at the runtime "Configured trusted admins" section (assemble.ts).
+// Tools the playbook names that exist only when UniFi is configured
+// (UNIFI_HOST + UNIFI_API_KEY).
+export const UNIFI_ONLY_TOOLS = ['list_clients'] as const;
+
 export const CORE_PLAYBOOK = `# unifi-siem-lens triage playbook
 
 You are triaging the unifi-siem-lens analysis queue for one operator's UniFi network. The lens runs code-driven detections over the gateway's IDS/IPS and event log; findings its rules couldn't close wait here for your verdict. The operator runs this at most once a day and reads only what you send to **Needs attention**, so a wrong \`attention\` costs their time and a wrong \`close\` hides a real problem.
@@ -24,7 +28,7 @@ You are triaging the unifi-siem-lens analysis queue for one operator's UniFi net
 1. Call \`get_pending_analyses\` with \`limit: 25\`. If it returns nothing, report "queue empty" in one line and skip to step 5: feedback still needs reviewing. Don't go looking for other work.
 2. For each request, in the order returned:
    1. Call \`get_analysis_context\` with its \`id\`. The bundle is built when you fetch it, so it reflects the sink as it is now.
-   2. Optionally resolve the IPs in it to client names with the \`unifi\` MCP server's \`list_clients\` (\`include_offline: true\`), if that server is available. Enrichment is never required: if the call fails or an IP has no match, carry on IP-only.
+   2. Optionally resolve the IPs in it to client names with this server's \`list_clients\` (\`include_offline: true\`), available when UniFi is configured. Enrichment is never required: if the tool is missing, the call fails or an IP has no match, carry on IP-only.
    3. Decide \`close\` or \`attention\` using the rest of this playbook.
    4. Call \`submit_analysis\`. If it is rejected, read the error; the request stays pending. A rejection for a missing or blank field (\`summary\`, \`reasoning\`, \`recommended_action\`, \`why_now\`) is a mistake in your call: add the field and resubmit. Any other rejection is the evidence check; see "Guardrails" for what to do.
 3. When two or more requests in the batch clearly share a root cause (same source IP, same signature, overlapping events), say so in each one's \`reasoning\` rather than treating them as unrelated.
@@ -83,6 +87,8 @@ The server also enforces some of this in code:
 On a rejection the request stays pending. Either submit \`attention\` with a \`recommended_action\` that addresses what wasn't blocked, or report the rejection to the operator in your summary. **Never work around a guardrail**: don't retry with reworded text, a citation that doesn't really cover the case, or a different verdict you don't believe.
 
 ## Recommending UniFi actions
+
+Never call UniFi write tools (create_, update_, delete_, block_, unblock_, set_, remove_), even if they are listed; put what should change in \`recommended_action\` for the operator.
 
 A \`recommended_action\` names the exact IP, client, port, signature or device. Typical actions and when they fit:
 

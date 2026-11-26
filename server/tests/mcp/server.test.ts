@@ -7,19 +7,23 @@ import type { EventsDb } from '../../src/db/eventsDb.js';
 import { assemblePlaybook } from '../../src/mcp/playbook/assemble.js';
 import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
-import { createMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
-import { seededEventsDb } from '../helpers.js';
+import { createMcpServer, type McpDeps, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
+import { UNIFI_ONLY_TOOLS } from '../../src/mcp/playbook/core.js';
+import { seededEventsDb, stubUnifiClient } from '../helpers.js';
 
 async function connect({
   eventsDb = seededEventsDb([]),
   lensDb = openLensDb(':memory:'),
+  unifi = null,
 }: {
   eventsDb?: EventsDb;
   lensDb?: LensDb;
+  unifi?: McpDeps['unifi'];
 }) {
   const server = createMcpServer({
     lensDb,
     eventsDb,
+    unifi,
     unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   }, { trustedAdminNames: ['alice'] });
@@ -124,15 +128,36 @@ describe('MCP server', () => {
     expect(text).toContain(`### [${second.id}] Mine\n\n`);
   });
 
-  it('every lens tool the playbook names is registered', async () => {
-    const client = await connect({ eventsDb: seededEventsDb([]) });
-    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
-    const named = new Set(
-      [...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
+  function namedTools() {
+    return new Set(
+      [
+        ...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(
+          /`((?:get|submit|propose|list|mark)_[a-z_]+)`/g
+        ),
+      ].map((m) => m[1])
     );
-    // list_clients belongs to the separate `unifi` MCP server, not the lens.
-    named.delete('list_clients');
+  }
+
+  it('with UniFi off, every always-on tool the playbook names is registered and UniFi-only ones are not', async () => {
+    const registered = new Set((await (await connect({})).listTools()).tools.map((t) => t.name));
+    const named = namedTools();
     expect(named.size).toBeGreaterThan(0);
-    for (const n of named) expect(registered).toContain(n);
+    for (const n of named) {
+      if ((UNIFI_ONLY_TOOLS as readonly string[]).includes(n)) expect(registered).not.toContain(n);
+      else expect(registered).toContain(n);
+    }
+  });
+
+  it('with UniFi configured, every tool the playbook names is registered', async () => {
+    const client = await connect({ unifi: { client: stubUnifiClient, allowWrites: false } });
+    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
+    for (const n of namedTools()) expect(registered).toContain(n);
+    expect(registered).not.toContain('delete_firewall_rule');
+  });
+
+  it('never tells triage to use a write tool', () => {
+    const text = assemblePlaybook({ trustedAdminNames: [], entries: [] });
+    expect(text).toMatch(/Never call UniFi write tools/);
+    expect(text).not.toMatch(/the `unifi` MCP server/);
   });
 });

@@ -28,6 +28,7 @@ function config(): Config {
     trustedAdminNames: [],
     safeSignaturePrefixes: ['ET DROP'],
     homelabServicesPath: join(dir, 'homelab-services.json'),
+    unifi: null,
   };
 }
 

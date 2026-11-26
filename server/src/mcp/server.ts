@@ -2,6 +2,8 @@ import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { LensDb } from '../db/lensDb.js';
 import { listEntries, operatorBackedEntryIds } from '../db/playbookStore.js';
+import type { IUnifiClient } from '../unifi/client.js';
+import { allUnifiTools, registerUnifiTools } from '../unifi/tools/index.js';
 import type { AnalysisDeps } from './context.js';
 import { registerEventTools } from './eventTools.js';
 import { assemblePlaybook, type PlaybookOptions, type SiteEntry } from './playbook/assemble.js';
@@ -29,8 +31,12 @@ function activeSiteEntries(db: LensDb): SiteEntry[] {
 }
 
 // One server per /mcp request (stateless transport), built the same way in tests.
+export type McpDeps = AnalysisDeps & {
+  unifi: { client: IUnifiClient; allowWrites: boolean } | null;
+};
+
 export function createMcpServer(
-  deps: AnalysisDeps,
+  deps: McpDeps,
   settings: Omit<PlaybookOptions, 'entries'>
 ): McpServer {
   const server = new McpServer(
@@ -39,6 +45,11 @@ export function createMcpServer(
   );
   registerEventTools(server, deps.eventsDb);
   registerAnalysisTools(server, deps);
+  if (deps.unifi) {
+    registerUnifiTools(server, allUnifiTools(deps.unifi.client), {
+      allowWrites: deps.unifi.allowWrites,
+    });
+  }
   registerPlaybookTools(server, deps.lensDb);
 
   // Entries are read on each call, so an accepted proposal shows up at once.

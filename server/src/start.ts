@@ -14,6 +14,7 @@ import type { Logger } from './logger.js';
 import { PLAYBOOK_DEFAULTS } from './mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from './mcp/playbook/seed.js';
 import { createApp } from './server.js';
+import { UnifiClient } from './unifi/client.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -116,7 +117,25 @@ export async function start(
   runDailyCheckSafely();
   const dailyTimer = setInterval(runDailyCheckSafely, DAY_MS);
 
-  const app = createApp({ eventsDb: events.reader, lensDb, runnerDeps, listener }, config);
+  const unifiClient = config.unifi
+    ? new UnifiClient({
+        host: config.unifi.host,
+        apiKey: config.unifi.apiKey,
+        site: config.unifi.site,
+        verifyTls: config.unifi.verifyTls,
+        timeoutMs: config.unifi.timeoutMs,
+      })
+    : null;
+  logger.info(
+    config.unifi
+      ? `UniFi: ${config.unifi.host} site ${config.unifi.site}, write tools ${config.unifi.allowWrites ? 'ENABLED' : 'off'}`
+      : 'UniFi: not configured (no UniFi tools, no enrichment)'
+  );
+
+  const app = createApp(
+    { eventsDb: events.reader, lensDb, runnerDeps, listener, unifiClient },
+    config
+  );
   const httpServer = await new Promise<Server>((resolve) => {
     const s = app.listen(config.port, config.host, () => resolve(s));
   });

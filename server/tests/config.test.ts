@@ -83,4 +83,49 @@ describe('loadConfig', () => {
     expect(config.trustedAdminNames).toEqual(['Ian C.', 'Jane Doe']);
     expect(config.safeSignaturePrefixes).toEqual(['ET DROP', 'ET CUSTOM']);
   });
+
+  describe('UniFi', () => {
+    beforeEach(() => {
+      for (const k of ['UNIFI_HOST', 'UNIFI_API_KEY', 'UNIFI_SITE', 'UNIFI_VERIFY_TLS', 'UNIFI_REQUEST_TIMEOUT_MS', 'UNIFI_ALLOW_WRITES']) {
+        delete process.env[k];
+      }
+    });
+
+    it('is null when neither UNIFI_HOST nor UNIFI_API_KEY is set', () => {
+      expect(loadConfig().unifi).toBeNull();
+    });
+
+    it('throws when only one of UNIFI_HOST / UNIFI_API_KEY is set', () => {
+      process.env.UNIFI_HOST = 'https://unifi.example';
+      expect(() => loadConfig()).toThrow('UNIFI_HOST and UNIFI_API_KEY must be set together');
+      delete process.env.UNIFI_HOST;
+      process.env.UNIFI_API_KEY = 'key';
+      expect(() => loadConfig()).toThrow('UNIFI_HOST and UNIFI_API_KEY must be set together');
+    });
+
+    it('applies defaults when both are set, writes off', () => {
+      process.env.UNIFI_HOST = 'https://unifi.example';
+      process.env.UNIFI_API_KEY = 'key';
+      expect(loadConfig().unifi).toEqual({
+        host: 'https://unifi.example',
+        apiKey: 'key',
+        site: 'default',
+        verifyTls: false,
+        timeoutMs: 10000,
+        allowWrites: false,
+      });
+    });
+
+    it('enables writes only for the literal "true"', () => {
+      process.env.UNIFI_HOST = 'https://unifi.example';
+      process.env.UNIFI_API_KEY = 'key';
+      process.env.UNIFI_ALLOW_WRITES = 'TRUE';
+      expect(loadConfig().unifi?.allowWrites).toBe(false);
+      process.env.UNIFI_ALLOW_WRITES = '1';
+      expect(loadConfig().unifi?.allowWrites).toBe(false);
+      process.env.UNIFI_ALLOW_WRITES = 'true';
+      expect(loadConfig().unifi?.allowWrites).toBe(true);
+    });
+  });
 });
+

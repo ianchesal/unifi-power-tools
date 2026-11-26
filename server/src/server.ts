@@ -16,16 +16,18 @@ import { loadHomelabServices } from './enrichment/homelabServices.js';
 import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
 import type { SyslogListener } from './ingest/listener.js';
 import { createMcpServer } from './mcp/server.js';
+import type { IUnifiClient } from './unifi/client.js';
 
 export interface AppDeps {
   eventsDb: EventsDb;
   lensDb: LensDb;
   runnerDeps: RunnerDeps;
   listener: Pick<SyslogListener, 'bound' | 'droppedCount'>;
+  unifiClient: IUnifiClient | null;
 }
 
 export function createApp(deps: AppDeps, config: Config) {
-  const { eventsDb, lensDb, runnerDeps, listener } = deps;
+  const { eventsDb, lensDb, runnerDeps, listener, unifiClient } = deps;
   const app = express();
   app.use(
     rateLimit({
@@ -49,7 +51,9 @@ export function createApp(deps: AppDeps, config: Config) {
     next();
   };
 
-  app.get('/health', (_req, res) => {
+  // Liveness: no network calls. status is ok only if syslog is bound and the
+  // events DB answers.
+  const coreStatus = () => {
     let eventsDbStatus: 'ok' | 'error' = 'ok';
     try {
       eventsDb.conn.prepare('SELECT 1').get();
@@ -57,11 +61,31 @@ export function createApp(deps: AppDeps, config: Config) {
       eventsDbStatus = 'error';
     }
     const bound = listener.bound();
-    res.json({
-      status: bound && eventsDbStatus === 'ok' ? 'ok' : 'degraded',
+    return {
+      status: bound && eventsDbStatus === 'ok' ? ('ok' as const) : ('degraded' as const),
       syslog: { bound, droppedMessages: listener.droppedCount() },
       eventsDb: eventsDbStatus,
-    });
+    };
+  };
+
+  app.get('/health', (_req, res) => {
+    res.json(coreStatus());
+  });
+
+  // Readiness: adds UniFi reachability. UniFi being down doesn't make the
+  // service unready for ingest, so only the core status decides the code.
+  app.get('/ready', async (_req, res) => {
+    const core = coreStatus();
+    let unifi: 'ok' | 'unavailable' | 'not_configured' = 'not_configured';
+    if (unifiClient) {
+      try {
+        await unifiClient.get('stat/sysinfo');
+        unifi = 'ok';
+      } catch {
+        unifi = 'unavailable';
+      }
+    }
+    res.status(core.status === 'ok' ? 200 : 503).json({ ...core, unifi });
   });
 
   app.use('/api', createEventsRouter(eventsDb));
@@ -81,7 +105,15 @@ export function createApp(deps: AppDeps, config: Config) {
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
     const mcpServer = createMcpServer(
-      { lensDb, eventsDb, unifiMcp, homelabServices },
+      {
+        lensDb,
+        eventsDb,
+        unifiMcp,
+        homelabServices,
+        unifi: unifiClient
+          ? { client: unifiClient, allowWrites: config.unifi?.allowWrites === true }
+          : null,
+      },
       { trustedAdminNames: config.trustedAdminNames }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -114,7 +146,8 @@ export function createApp(deps: AppDeps, config: Config) {
         req.method !== 'GET' ||
         req.path.startsWith('/api') ||
         req.path.startsWith('/mcp') ||
-        req.path.startsWith('/health')
+        req.path.startsWith('/health') ||
+        req.path.startsWith('/ready')
       ) {
         next();
         return;

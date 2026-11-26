@@ -25,6 +25,33 @@ export interface Config {
   trustedAdminNames: string[];
   safeSignaturePrefixes: string[];
   homelabServicesPath: string;
+  // null when UniFi isn't configured (neither UNIFI_HOST nor UNIFI_API_KEY set).
+  unifi: UnifiConfig | null;
+}
+
+export interface UnifiConfig {
+  host: string;
+  apiKey: string;
+  site: string;
+  verifyTls: boolean;
+  timeoutMs: number;
+  // Only the literal 'true' registers UniFi write tools on /mcp.
+  allowWrites: boolean;
+}
+
+function loadUnifiConfig(): UnifiConfig | null {
+  const host = process.env.UNIFI_HOST?.trim() ?? '';
+  const apiKey = process.env.UNIFI_API_KEY?.trim() ?? '';
+  if (!host && !apiKey) return null;
+  if (!host || !apiKey) throw new Error('UNIFI_HOST and UNIFI_API_KEY must be set together');
+  return {
+    host,
+    apiKey,
+    site: process.env.UNIFI_SITE?.trim() || 'default',
+    verifyTls: process.env.UNIFI_VERIFY_TLS === 'true',
+    timeoutMs: parseIntEnv('UNIFI_REQUEST_TIMEOUT_MS', 10000),
+    allowWrites: process.env.UNIFI_ALLOW_WRITES === 'true',
+  };
 }
 
 function parseIntEnv(key: string, defaultValue: number): number {
@@ -76,5 +103,6 @@ export function loadConfig(): Config {
       ? parseCommaList(process.env.SAFE_SIGNATURE_PREFIXES)
       : DEFAULT_SAFE_SIGNATURE_PREFIXES,
     homelabServicesPath: process.env.HOMELAB_SERVICES_PATH ?? './data/homelab-services.json',
+    unifi: loadUnifiConfig(),
   };
 }

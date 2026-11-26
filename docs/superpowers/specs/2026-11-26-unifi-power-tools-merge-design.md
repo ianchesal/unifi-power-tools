@@ -182,7 +182,7 @@ One `McpServer` per request (stateless, as all three do now), name
   `destructiveHint` annotations so clients see it too; registration filters
   on that declaration. Tests: (1) every UniFi tool has an explicit
   declaration; (2) backstop — every tool whose name matches
-  `create_|update_|delete_|block_|unblock_|set_|remove_` (23 of 37 today) is
+  `create_|update_|delete_|block_|unblock_|set_|remove_` (22 of 37 today) is
   declared a write; (3) with writes off, no write tool is listed.
 - The `instructions` string and the playbook core (`mcp/playbook/core.ts`)
   gain one generic line: triage never calls UniFi write tools, even when they
