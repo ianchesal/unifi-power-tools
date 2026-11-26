@@ -97,17 +97,20 @@ project name, adjust `unifi-siem-sink` above to match.
 }
 ```
 
-Then, in a Claude Code session with this configured, ask it to check for
-pending analyses. Findings the rules couldn't close are queued automatically;
-the session fetches them, reasons about each with the actual event context,
-and posts a verdict (close, or needs attention) back — which then shows up
-next to the finding.
+Then, in a Claude Code session with this configured, run
+`/mcp__unifi-siem-lens__triage`. In general the command is
+`/mcp__<server name>__triage`, where the server name is the key you used under
+`mcpServers`. Findings the rules couldn't close are queued automatically; the
+session loads the lens's triage playbook, fetches the queue, reasons about each
+finding with the actual event context, and posts a verdict (close, or needs
+attention) back, which then shows up next to the finding. See
+[Running triage](#running-triage) for running it on a schedule.
 
 ## Dashboard & MCP tools
 
 | Surface | What it gives you |
 |---|---|
-| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip (with a button that copies a ready-made "work the queue" prompt for Claude Code), events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). |
+| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip (with a button that copies the `/mcp__unifi-siem-lens__triage` command), events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). |
 | Admin (`/admin`) | One-off maintenance actions — currently just the rule-triage backfill (see below). |
 | `GET /health` | Liveness + sink DB / schema-contract status. |
 | `GET /api/findings` | List findings. `view=open\|attention\|triaging\|closed\|all` (default `open`), optional `closed_by`, `q`, and `limit`/`offset` (paginated as `{ items, total }`). Each item carries its latest answered analysis and the note of its latest reopen (`latest_reopen_note`). |
@@ -120,9 +123,46 @@ next to the finding.
 | `GET /api/analysis-requests` | Pending requests, or all of a finding's with `?findingId=`. |
 | `GET /api/queue` | AI queue stats for the queue strip. |
 | `POST /api/admin/backfill-rule-triage` | Re-checks every never-decided `triaging` finding against the auto-triage rules; returns `{ checked, closed, byRule }`. |
+| `triage` (MCP prompt) | The triage playbook plus run procedure. In Claude Code: `/mcp__unifi-siem-lens__triage`. |
+| `get_playbook` (MCP) | The same playbook as a tool result, for clients that can't use MCP prompts. |
 | `get_pending_analyses` (MCP) | List queued analysis requests, highest severity first (`limit?`). |
 | `get_analysis_context` (MCP) | Full context for one request, built when you fetch it: the finding, its history, prior analyses, recent events, activity since the last decision, and (for rechecks) before/after activity summaries. |
 | `submit_analysis` (MCP) | Post a verdict (`close` or `attention`) with risk level, summary and reasoning; see [Verdict guardrails](#verdict-guardrails). |
+
+## Running triage
+
+The lens has no LLM access of its own. A Claude Code session does the analysis
+over MCP, guided by a **triage playbook** the lens serves: the run procedure,
+when to close and when to send a finding to Needs attention, which UniFi
+actions to recommend, and guardrails the playbook can't be talked out of. It
+also lists your `TRUSTED_ADMIN_NAMES`, added at request time, so Claude
+applies the same trusted-admin rule the rules do. The
+playbook's core is code-owned (`server/src/mcp/playbook/`), so it is public and
+generic; site-specific knowledge arrives in a later release. The MCP server's
+`instructions` point any client at it.
+
+**Interactively:** run `/mcp__unifi-siem-lens__triage` in a Claude Code
+session that has the lens configured. The dashboard's queue strip has a button
+that copies the command.
+
+**On a schedule:** run it non-interactively from cron on the machine where you
+use Claude Code, at most once a day. The run handles up to 25 queued findings
+and says so if more remain. For example, every morning at 07:00:
+
+```cron
+0 7 * * * cd "$HOME" && "$HOME/.local/bin/claude" -p "/mcp__unifi-siem-lens__triage" --allowedTools "mcp__unifi-siem-lens" >> "$HOME/lens-triage.log" 2>&1
+```
+
+cron runs with a minimal `PATH`, so give `claude` by its absolute path. Use
+whatever `command -v claude` prints in your shell; `$HOME/.local/bin/claude`
+is the native installer's default.
+
+`--allowedTools "mcp__unifi-siem-lens"` pre-approves every tool on the lens's
+MCP server and nothing else. Add `mcp__unifi__list_clients` if you also run
+`unifi-mcp-server` and want findings enriched with client names. `claude -p`
+picks up the MCP server from your Claude Code config (or pass `--mcp-config`).
+It expands the prompt's slash command the same way an interactive session does.
+This was checked with Claude Code 2.1.332.
 
 ## Finding lifecycle
 
@@ -282,25 +322,16 @@ for `HOMELAB_SERVICES_PATH`.
 ## Claude Code skill: analyzing findings
 
 If you're working in this repo with Claude Code, `server/.claude/skills/analyzing-findings/`
-ships a skill (scoped to the `server` workspace, since it drives the MCP
-analysis handoff) that automates the "check for pending analyses"
-workflow beyond what a plain request to Claude Code does on its own:
+ships a skill (scoped to the `server` workspace) for running triage from a
+development session. It loads the served playbook with `get_playbook` and
+follows it, the same as `/mcp__unifi-siem-lens__triage`, then adds one
+repo-only step: it flags findings that look like candidates for a new
+[rule-based auto-triage](#rule-based-auto-triage) rule (a low-risk,
+fully-explained pattern that has recurred and isn't already covered by a rule
+in `ruleTriage.ts`), without writing the rule code itself. That stays a
+deliberate, reviewed change.
 
-- Drains the entire `get_pending_analyses` queue, not just one request, and
-  submits a `close` or `attention` verdict for each.
-- Enriches each finding by resolving source/destination IPs to hostnames
-  via `unifi-mcp-server`'s client list, when that server is configured and
-  reachable (falls back to IP-only otherwise).
-- Cross-references findings in the same batch that share a root cause
-  (same source IP or signature) so their recommendations note the
-  connection instead of being analyzed in isolation.
-- After answering each finding, flags any that look like good candidates
-  for a new [rule-based auto-triage](#rule-based-auto-triage) rule —
-  a low-risk, fully-explained pattern that has recurred and isn't already
-  covered by an existing rule — without writing the rule code itself; that
-  stays a deliberate, reviewed change to `ruleTriage.ts`.
-
-Ask a Claude Code session working in this repo to "reanalyze findings" or
+Ask a Claude Code session working in this repo to "reanalyze findings", or
 invoke it directly as `/server:analyzing-findings`.
 
 ## Environment Variables

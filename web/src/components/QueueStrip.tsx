@@ -4,13 +4,8 @@ import { copyText } from '../clipboard';
 import { relativeTime } from '../format';
 import type { Finding, PendingAnalysis, QueueStats } from '../types';
 
-// Phase B swaps this for the slash command.
-export const TRIAGE_PROMPT =
-  'Work the unifi-siem-lens analysis queue. Use the analyzing-findings skill if it is available. ' +
-  'Otherwise: call get_pending_analyses, then get_analysis_context for each pending request, ' +
-  'reason about the evidence, and submit a verdict (close or attention) with submit_analysis. ' +
-  'When you are done, summarize what you closed, what needs my attention and why, and any ' +
-  'recurring low-risk findings that look like candidates for a new auto-triage rule.';
+// The MCP prompt as Claude Code exposes it, for a server configured as `unifi-siem-lens`.
+export const TRIAGE_PROMPT = '/mcp__unifi-siem-lens__triage';
 
 type CopyState = 'idle' | 'copied' | 'failed';
 
@@ -70,7 +65,7 @@ export function QueueStrip({ refreshKey, queue }: { refreshKey: number; queue: Q
       <div className="queue-strip-head">
         <button type="button" className="queue-strip-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           {queue.count} finding{queue.count === 1 ? '' : 's'} waiting for AI analysis
-          {oldest ? ` · oldest ${oldest}` : ''}
+          {oldest ? ` · oldest ${oldest}` : ''} · run <code className="mono">{TRIAGE_PROMPT}</code>
         </button>
         <button
           type="button"
@@ -79,7 +74,7 @@ export function QueueStrip({ refreshKey, queue }: { refreshKey: number; queue: Q
           title={TRIAGE_PROMPT}
           aria-live="polite"
         >
-          {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? "Couldn't copy" : 'Copy prompt for Claude Code'}
+          {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? "Couldn't copy" : 'Copy command'}
         </button>
       </div>
       {expanded && listError && <p className="queue-strip-error">Couldn't load the queued findings.</p>}
