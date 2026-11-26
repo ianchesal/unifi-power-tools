@@ -56,9 +56,12 @@ Archive the other two repos with a pointer here.
   one `/mcp`, write tools would sit next to it. Off by default is the guard.
 - Analysis work able to crash ingest. One process means a throw in an
   analysis job kills syslog capture; every scheduled job keeps its own
-  try/catch (as `runCheck`/`runChecksSafely` already do), and the syslog
-  listener's per-message handling never throws out of its handler.
-- Lens's existing tests weakened to make the move pass.
+  try/catch (as `runCheck`/`runChecksSafely` already do), the syslog
+  listener's per-message handling never throws out of its handler, and
+  `index.ts` installs a logging `process.on('unhandledRejection')` handler
+  that does not exit (async `/mcp` and UniFi paths must not kill ingest).
+- Lens's existing tests weakened to make the move pass. Tests deleted along
+  with the code they cover are not weakening (listed under "Tests" below).
 
 ## Constraints
 
@@ -66,7 +69,8 @@ Archive the other two repos with a pointer here.
   Raise `engines` in the server package.
 - `node:sqlite` only, no native SQLite dependency.
 - Same stack as today: Express 5, MCP SDK, zod, biome (server), oxlint (web),
-  vitest. All three already use these.
+  vitest. All three already use these. One added server dependency:
+  `undici`, which `unifi/client.ts` uses for its TLS-skip `Agent`.
 - Public repo: no real addresses, hostnames or site data in code, tests or
   docs (existing RFC 5737 test rule applies to everything moved in).
 - `/mcp` keeps `Authorization: Bearer <MCP_SECRET>`.
@@ -90,8 +94,17 @@ boot for little gain.
 
 Process layout: one process was chosen over one image running two processes
 (ingest separate). **Known shortcoming, documented in the README:** syslog is
-UDP and the UDM doesn't retry, so events sent while the service restarts
-(deploys, crashes) are lost. High-fidelity capture isn't required.
+UDP and the UDM doesn't retry, so events can be lost (a) while the service
+restarts (deploys, crashes) and (b) while a long synchronous analysis run
+(hourly checks, daily anomaly + recheck, a dashboard-triggered run) blocks the
+event loop long enough for the kernel's UDP receive buffer to fill. Loss of
+kind (b) is not counted by `droppedMessages` (that counts only oversized
+messages). High-fidelity capture isn't required. Cheap mitigations that are
+in scope: bind the syslog listener **before** the boot-time
+`runChecksSafely()` / `runDailyCheckSafely()` calls (today they run before
+anything listens), and set a larger `recvBufferSize` on the dgram socket.
+The builder measures hourly and daily run times against a real-sized
+`events.db` and puts the numbers in the README next to the shortcoming.
 
 ## Design
 
@@ -130,17 +143,19 @@ the mirrored paths under `server/tests/` (sink fixtures into
 
 - `events.db` (`EVENTS_DB_PATH`) is opened **read-write** by `db/eventsDb.ts`
   with the sink's migration array, applied at boot exactly as the sink does
-  today (WAL, `schema_migrations`). Existing sink DBs are already at
-  migration 4, so nothing re-runs.
+  today (WAL, `schema_migrations`). A DB from an older sink catches up at
+  first boot (migration 3, `reparseClientEvents`, is safe to re-run).
 - The read-only `openSinkDb`, `verifySchema`, `EXPECTED_COLUMNS`, the
   `sinkDb: 'available' | 'unavailable'` health fields, every `sinkDb | null`
   and `runnerDeps | null` degraded-mode branch, and the "old-sink isolation
   rule" in `sinkQueries.ts` are deleted. The events DB is created if absent,
   so "missing sink DB" can't happen; if it fails to open, the process exits.
-- Analysis keeps reading events through the same query functions; use a
-  single shared `DatabaseSync` connection for events (ingest writes, analysis
-  and API read; `node:sqlite` is synchronous so there is no interleaving
-  inside a query).
+- Two connections to `events.db`: one **read-write** used only by ingest
+  and the retention purge, and one **read-only**
+  (`new DatabaseSync(path, { readOnly: true })`, opened after migrations)
+  for analysis, `/api` and `/mcp`. This keeps today's guarantee that code
+  handling attacker-influenced text can't write events; in WAL mode the
+  reader costs almost nothing and sees committed writes.
 - `lens.db` (`LENS_DB_PATH`) unchanged. The table/variable naming "sink" in
   lens code becomes "events" (`SinkDb` → `EventsDb`, `sinkQueries` →
   `eventQueries`); the `lens` names for findings/playbook stay — "lens" is now
@@ -162,29 +177,54 @@ One `McpServer` per request (stateless, as all three do now), name
 | Playbook | `get_playbook`, `list_playbook_proposals`, `propose_playbook_change`, `import_knowledge` prompt, `triage` prompt | unchanged |
 
 - Writes off means the tools are **not registered**, so a session never sees
-  them (better than registered-and-refusing). Each UniFi tool module declares
-  which of its tools are writes; registration filters on that, not on name
-  prefixes. A test asserts that with writes off, no write tool is listed, and
-  that the write list covers every non-read tool in `unifi/tools/`.
+  them (better than registered-and-refusing). Every UniFi tool declares
+  `readOnly: true | false` explicitly, emitted as the MCP `readOnlyHint` /
+  `destructiveHint` annotations so clients see it too; registration filters
+  on that declaration. Tests: (1) every UniFi tool has an explicit
+  declaration; (2) backstop — every tool whose name matches
+  `create_|update_|delete_|block_|unblock_|set_|remove_` (23 of 37 today) is
+  declared a write; (3) with writes off, no write tool is listed.
 - The `instructions` string and the playbook core (`mcp/playbook/core.ts`)
   gain one generic line: triage never calls UniFi write tools, even when they
   are present; recommendations go in `recommended_action` for the operator.
-- The existing "playbook names an unregistered tool" test must pass with
-  writes off and UniFi unconfigured (the playbook may name only always-on
-  tools).
+- Playbook tool names: core step 2.2 today says "the `unifi` MCP server's
+  `list_clients`", and the test exempts it by hand
+  (`named.delete('list_clients')` in `tests/mcp/server.test.ts`). Reword the
+  step to "this server's `list_clients`, available when UniFi is
+  configured". Replace the hand exemption with a named constant of tools that
+  exist only when UniFi is configured. Run the test twice: UniFi off (every
+  named always-on tool must be registered) and UniFi stubbed (every named
+  tool must be registered).
 - A test asserts tool names are unique across groups (none collide today).
-- The triage prompt's slash command becomes
-  `/mcp__unifi-power-tools__triage` (follows from the server name; README and
-  the `triage` skill text updated).
+- Slash command: Claude Code builds `/mcp__<key>__triage` from the server's
+  key in the client config, not from the `McpServer` name. Rename the key in
+  `.mcp.json.example` to `unifi-power-tools`, and the README's migration
+  step tells the operator to rename their own config entry, which makes the
+  command `/mcp__unifi-power-tools__triage`.
 
 ### Enrichment
 
 `enrichment/unifiMcpClient.ts` (an MCP client to a second server) is replaced
-by an enricher calling `unifi/client.ts` directly, doing what the MCP calls
-did (`get_client` by IP → name/network; `list_firewall_rules`). Keep the
-existing contract: if UniFi isn't configured it's a no-op, and any API error
-resolves to `null` rather than throwing, so enrichment never blocks building
-an analysis context.
+by an enricher calling `unifi/client.ts` directly.
+
+**The old client-name lookup never worked:** it called `get_client` with
+`{ ip }`, but that tool takes `{ mac }` and searches only online clients
+(`stat/sta`), so argument validation failed, the parse threw, the catch
+returned null, and `knownClient` has always been null. Don't port it; define
+it:
+
+- `resolveClient(ip)`: fetch `stat/alluser` (online and offline clients),
+  find the client whose `ip` or `last_ip` equals `ip`, return
+  `{ name: name ?? hostname, network: network ?? 'unknown' }`, or null if
+  none matches or neither name nor hostname is set.
+- `getFirewallSummary()`: the `list_firewall_rules` result as JSON text,
+  capped at 8 KB (truncated with a marker), since it goes into an LLM
+  context bundle.
+- Contract kept: no UniFi configured → no-op returning null; any API error
+  resolves to null rather than throwing, so enrichment never blocks building
+  an analysis context.
+- Tests with a stubbed `IUnifiClient` prove a name actually comes back
+  (match on `ip`, match on `last_ip`, hostname fallback, no match, API error).
 
 ### UniFi configuration
 
@@ -195,6 +235,11 @@ UniFi as `not_configured`. Only one set → fail fast at startup.
 
 ### Dashboard authentication
 
+Why: the UniFi API key now lives in this process, and independently, an
+unauthenticated LAN user can already accept playbook proposals, which make
+`close` verdicts operator-backed. **No release is cut between moving the
+UniFi client in and auth landing.**
+
 - `DASHBOARD_PASSWORD` env var, **required** (startup fails without it, like
   `MCP_SECRET`). It must differ from `MCP_SECRET`; startup fails if equal.
 - `POST /api/auth/login` with JSON `{ password }`: constant-time comparison
@@ -203,15 +248,30 @@ UniFi as `not_configured`. Only one set → fail fast at startup.
   limit on this route (e.g. 10 attempts per 15 minutes per IP) on top of the
   global limiter.
 - Session cookie: `HttpOnly`, `SameSite=Strict`, `Path=/`, a 30-day expiry,
-  `Secure` when the request arrived over HTTPS (Express `trust proxy` set so
-  NPM's `X-Forwarded-Proto` counts). Value is a stateless signed token
-  (expiry + HMAC-SHA256), keyed from a secret derived from
-  `DASHBOARD_PASSWORD`, so sessions survive restarts and changing the
-  password logs everyone out. No session table.
+  `Secure` when `req.secure` is true. Value is a stateless signed token
+  (expiry + HMAC-SHA256). The HMAC key is
+  `HMAC(sessionSecret, SHA-256(DASHBOARD_PASSWORD))`, where `sessionSecret`
+  is 32 random bytes generated on first boot and stored in `lens.db` (a new
+  migration adding a small `meta` key/value table). Sessions survive
+  restarts, changing the password logs everyone out, and a captured cookie
+  can't be used to guess the password offline (the key isn't derivable from
+  the password alone). No session table.
+- `trust proxy`: **off by default.** A new optional `TRUST_PROXY` env var is
+  passed to Express's `trust proxy` setting verbatim (e.g. NPM's address on
+  the `proxy` network). Never `true`: port 3002 stays published on the host,
+  so a client bypassing NPM could forge `X-Forwarded-For` to dodge the
+  per-IP login limit (express-rate-limit v8 also rejects `true` as
+  `ERR_ERL_PERMISSIVE_TRUST_PROXY`). With it unset, the login limit keys on
+  the immediate peer (all NPM traffic shares one bucket, acceptable for a
+  single user) and `Secure` is off (LAN HTTP). The README says to set it to
+  NPM's address when NPM terminates TLS.
 - `POST /api/auth/logout` clears the cookie. `GET /api/auth/session` returns
   200/401 so the SPA can decide what to render.
 - An auth middleware guards **all of `/api/*`** except `/api/auth/*`.
-  `/mcp` keeps its bearer check and ignores cookies. `/health` stays open
+  `/mcp` keeps its bearer check and ignores cookies. The bearer comparison
+  moves to the same constant-time helper as the password (SHA-256 both
+  sides, `timingSafeEqual`); with `UNIFI_ALLOW_WRITES=true` that secret
+  gates firewall changes. `/health` stays open
   (Docker healthcheck) and reveals only status fields, no data. `/ready` is
   open too and reports component state only. The static SPA bundle is served
   without auth (it holds no data); every data call goes through `/api`.
@@ -227,12 +287,19 @@ UniFi as `not_configured`. Only one set → fail fast at startup.
 
 ### Health and readiness
 
+- Startup: a syslog bind failure (port in use) or an events DB open failure
+  exits the process with a clear log line. Both are fatal by design.
+- The listener exposes `bound()`: true once bound, false after a socket
+  `error` or `close` event (the post-bind error handler still swallows, but
+  records the state and logs once).
 - `GET /health` (liveness, no network calls): `{ status, syslog: { bound,
-  droppedMessages }, eventsDb: 'ok' }`.
-- `GET /ready`: adds UniFi reachability (`stat/sysinfo`, as the MCP server's
-  `/ready` does today): `ok | unavailable | not_configured`. UniFi being down
-  doesn't make the service unready for ingest; report it, return 200 unless
-  the events DB or listener is down.
+  droppedMessages }, eventsDb: 'ok' | 'error' }`, where `eventsDb` is a real
+  `SELECT 1` on the read-only connection. `status` is `ok` only if both are.
+  The Docker HEALTHCHECK stays on `/health`.
+- `GET /ready`: the same, plus UniFi reachability (`stat/sysinfo`, as the MCP
+  server's `/ready` does today): `ok | unavailable | not_configured`. UniFi
+  being down doesn't make the service unready for ingest: report it, and
+  return 200 unless the listener isn't bound or `eventsDb` is `error`.
 
 ### Configuration (every env var)
 
@@ -254,6 +321,7 @@ UniFi as `not_configured`. Only one set → fail fast at startup.
 | `UNIFI_VERIFY_TLS` | `false` | mcp-server | |
 | `UNIFI_REQUEST_TIMEOUT_MS` | `10000` | mcp-server | |
 | `UNIFI_ALLOW_WRITES` | `false` | new | only the literal `true` enables |
+| `TRUST_PROXY` | unset | new | passed to Express `trust proxy`; never `true` (rejected at startup) |
 | `LAN_CIDRS`, `TRUSTED_ADMIN_NAMES`, `SAFE_SIGNATURE_PREFIXES`, `HOMELAB_SERVICES_PATH` | as today | lens | |
 
 Removed: `SINK_DB_PATH`, `DB_PATH`, `MCP_PORT`, `MCP_HOST`,
@@ -269,8 +337,13 @@ message naming the replacement if any removed variable is set, so a stale
   title, Docker user/group names.
 - Version **2.0.0**: env vars, MCP server name, ports and compose all change.
 - GitHub repo renamed `unifi-siem-lens` → `unifi-power-tools` (GitHub keeps
-  redirects). Done by Ian in the GitHub UI or with `gh repo rename`, after the
-  merge PR lands.
+  redirects). Order matters: **merge, then rename the repo, then tag
+  v2.0.0**. `release.yml` derives the image from
+  `IMAGE_NAME: ${{ github.repository }}`, so after the rename it publishes
+  to `ghcr.io/ianchesal/unifi-power-tools` with no edit; tagging before the
+  rename would publish 2.0.0 under the old name. The rename is outward-facing:
+  done by Ian, or by Claude with his go-ahead.
+- `.mcp.json.example` key renamed to `unifi-power-tools`.
 - CLAUDE.md, README, docs/specs references updated; older specs keep their
   content but get a one-line note at the top pointing to this one where they
   describe the split (read-only sink DB, enrichment over MCP).
@@ -286,11 +359,13 @@ message naming the replacement if any removed variable is set, so a stale
   SIEM setting doesn't change), one volume `data:/data`, `proxy` network
   kept, no `volumes_from`, watchtower label kept.
 - **Migration from the three containers**, documented in the README as a
-  one-time procedure: stop the sink cleanly (so WAL is checkpointed), copy
-  `events.db` (plus any `-wal`/`-shm` left behind) from the sink's volume and
-  `lens.db` from lens's volume into the new `data` volume, start the new
-  service, verify `/health` and that events arrive, then remove the old
-  containers. Re-point the NPM proxy host at the new container and the Claude
+  one-time procedure: stop **both** the sink and lens cleanly (so WAL is
+  checkpointed), copy `events.db` and `lens.db` plus any `-wal`/`-shm` files
+  left behind for either, from their old volumes into the new `data` volume,
+  and `chown` them to the new image's user in the same step (the old images'
+  `adduser -S` users got arbitrary UIDs, and the new image renames the user).
+  Start the new service, verify `/health` and that events arrive, then
+  remove the old containers. Re-point the NPM proxy host at the new container and the Claude
   Code MCP config at the one `/mcp`. The exact `docker run --rm -v …` copy
   commands are the builder's to write and test.
 
@@ -303,17 +378,34 @@ was merged at), then archive the repo on GitHub. Existing ghcr images stay
 published, untouched. These steps are outward-facing and done only with
 Ian's go-ahead at that point.
 
+### Tests
+
+- Moved suites (sink parser/storage/syslog/tools, mcp-server tools/client)
+  keep their assertions; only imports and module names change.
+- Deleted with the code they cover: `tests/db/sinkDb.test.ts`,
+  `tests/enrichment/unifiMcpClient.test.ts`, every `sinkDb: null` /
+  `runnerDeps: null` degraded-mode case, `/health` schema-mismatch cases,
+  and the sink's and mcp-server's own `server.test.ts`/`config.test.ts`
+  /`logger.test.ts` (replaced by the merged ones).
+- API tests authenticate through a `loginAgent(app)` test helper that posts
+  to `/api/auth/login` with supertest's agent (cookie jar), so they exercise
+  the real middleware. New tests cover: unauthenticated `/api` → 401, login
+  success/failure, rate limit, expired/tampered cookie, password change
+  invalidates sessions, `/mcp` ignores cookies, `/health` open.
+
 ### CI and release
 
 One `ci.yml` (build, lint, test for both workspaces) and one `release.yml`
-(the existing lens release flow, image name changed). The release process
+(the existing lens release flow; the image name follows the repo rename, see
+"Rename"). The release process
 in memory still applies: bump PR, Ian merges, tag; never `npm version`.
 
 ## Left to the builder
 
 - Order of the moves and how to split them into PRs (a sensible order:
   move ingest + events DB and delete degraded mode → move UniFi client/tools
-  and the write gate → replace enrichment → auth → rename/Docker/docs).
+  and the write gate → replace enrichment → auth → rename/Docker/docs). No
+  release is tagged until auth has landed.
 - Exact module boundaries inside `server/src/unifi/` and `ingest/`, and how
   the two query modules are deduplicated.
 - Login screen look (match the dashboard's existing style).
@@ -323,7 +415,13 @@ in memory still applies: bump PR, Ian merges, tag; never `npm version`.
 
 - `DASHBOARD_PASSWORD` required, and must differ from `MCP_SECRET`.
 - Stateless signed session cookie (30 days, survives restarts) rather than
-  server-side sessions.
+  server-side sessions, keyed by a random per-install secret in `lens.db`
+  mixed with the password hash.
+- `TRUST_PROXY` off by default; port 3002 stays published on the host.
+- Client-name enrichment redefined (`stat/alluser`, match `ip`/`last_ip`),
+  since the old lookup never worked; firewall summary capped at 8 KB.
+- Two `events.db` connections: read-write for ingest/purge, read-only for
+  everything else.
 - `/health` and `/ready` unauthenticated; SPA bundle unauthenticated, all
   data behind `/api` auth.
 - UniFi optional (both vars or neither); write tools unregistered, not just
