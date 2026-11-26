@@ -9,6 +9,7 @@ import { createAnalysisRequestsRouter } from './api/analysisRequests.js';
 import { createEventsRouter } from './api/events.js';
 import { createFindingsRouter } from './api/findings.js';
 import { createPlaybookRouter } from './api/playbook.js';
+import { secretEquals } from './auth/secretCompare.js';
 import type { Config } from './config.js';
 import type { EventsDb } from './db/eventsDb.js';
 import type { LensDb } from './db/lensDb.js';
@@ -43,8 +44,8 @@ export function createApp(deps: AppDeps, config: Config) {
   const homelabServices = loadHomelabServices(config.homelabServicesPath);
 
   const mcpAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Bearer ${config.mcpSecret}`) {
+    const match = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
+    if (!match || !secretEquals(match[1], config.mcpSecret)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }

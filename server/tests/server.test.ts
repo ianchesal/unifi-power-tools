@@ -133,6 +133,33 @@ describe('createApp /mcp auth', () => {
       .send({});
     expect(res.status).toBe(401);
   });
+
+  it('rejects a bearer that is a prefix of the secret', async () => {
+    const res = await request(createApp(deps(), baseConfig))
+      .post('/mcp')
+      .set('Authorization', 'Bearer test-')
+      .send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a non-Bearer scheme carrying the secret', async () => {
+    const res = await request(createApp(deps(), baseConfig))
+      .post('/mcp')
+      .set('Authorization', 'Basic test-secret')
+      .send({});
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts the right bearer', async () => {
+    const res = await request(createApp(deps(), baseConfig))
+      .post('/mcp')
+      .set('Authorization', 'Bearer test-secret')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    expect(res.status).not.toBe(401);
+  });
+
+  it.todo('rejects a valid session cookie with no bearer (filled in with dashboard auth)');
 });
 
 describe('createApp /api/playbook', () => {
