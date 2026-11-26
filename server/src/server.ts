@@ -8,6 +8,7 @@ import { type RunnerDeps, runHourlyChecks, runRuleTriageBackfill } from './analy
 import { createAnalysisRequestsRouter } from './api/analysisRequests.js';
 import { createEventsRouter } from './api/events.js';
 import { createFindingsRouter } from './api/findings.js';
+import { createPlaybookRouter } from './api/playbook.js';
 import type { Config } from './config.js';
 import type { LensDb } from './db/lensDb.js';
 import type { SinkDb } from './db/sinkDb.js';
@@ -72,6 +73,7 @@ export function createApp(
   app.use('/api', createEventsRouter(sinkDb));
   app.use('/api', createFindingsRouter(lensDb, sinkDb));
   app.use('/api', createAnalysisRequestsRouter(lensDb));
+  app.use('/api/playbook', createPlaybookRouter(lensDb, homelabServices));
 
   app.post('/api/analysis/run', (_req, res) => {
     if (!runnerDeps) {

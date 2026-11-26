@@ -146,6 +146,41 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       UPDATE findings SET last_activity_at = last_seen WHERE status = 'triaging';
     `,
   },
+  {
+    // The learned playbook: site-knowledge entries and the proposals that change them.
+    version: 5,
+    sql: `
+      CREATE TABLE playbook_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        source_proposal_id INTEGER,
+        default_key TEXT
+      );
+      CREATE TABLE playbook_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        op TEXT NOT NULL CHECK (op IN ('add', 'edit', 'retire')),
+        entry_id INTEGER,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        rationale TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')),
+        proposed_by TEXT NOT NULL CHECK (proposed_by IN ('ai', 'human', 'default')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        decision_note TEXT,
+        edited_on_accept INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE playbook_defaults_seen (
+        default_key TEXT PRIMARY KEY,
+        version INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 export function openLensDb(path: string): LensDb {

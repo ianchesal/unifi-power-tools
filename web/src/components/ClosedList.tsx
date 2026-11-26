@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { errorMessage, fetchJson, postJson } from '../api';
 import { relativeTime } from '../format';
 import type { ClosedBy, Finding } from '../types';
+import { ReliedOn } from './AttentionCard';
 import { FindingIdentity } from './FindingIdentity';
 import { HistoryDetails } from './HistoryTimeline';
 import { NoteBox } from './NoteBox';
@@ -18,7 +19,15 @@ const CLOSED_BY_OPTIONS: { value: '' | ClosedBy; label: string }[] = [
 
 const CLOSED_BY_LABELS: Record<ClosedBy, string> = { rule: 'rule', ai: 'AI', human: 'human', system: 'system' };
 
-export function ClosedList({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+export function ClosedList({
+  refreshKey,
+  entryTitles,
+  onChanged,
+}: {
+  refreshKey: number;
+  entryTitles: ReadonlyMap<number, string>;
+  onChanged: () => void;
+}) {
   const [findings, setFindings] = useState<Finding[]>([]);
   const [total, setTotal] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -107,6 +116,7 @@ export function ClosedList({ refreshKey, onChanged }: { refreshKey: number; onCh
           <ClosedRow
             key={f.id}
             finding={f}
+            entryTitles={entryTitles}
             error={failure?.id === f.id ? failure.message : null}
             onChanged={handleChanged}
             onFailed={(message) => handleFailed(f.id, message)}
@@ -134,12 +144,14 @@ export function ClosedList({ refreshKey, onChanged }: { refreshKey: number; onCh
 
 function ClosedRow({
   finding,
+  entryTitles,
   error,
   onChanged,
   onFailed,
   onClearError,
 }: {
   finding: Finding;
+  entryTitles: ReadonlyMap<number, string>;
   error: string | null;
   onChanged: () => void;
   onFailed: (message: string) => void;
@@ -180,6 +192,7 @@ function ClosedRow({
     <div className="finding-card">
       <FindingIdentity finding={finding} badge={badge} />
       {finding.closed_reason && <p className="analysis-body">{finding.closed_reason}</p>}
+      <ReliedOn raw={finding.latest_analysis?.cited_entries ?? null} titles={entryTitles} />
       <div className="finding-actions">
         <button className="btn btn-danger-ghost" type="button" disabled={busy} onClick={openNote}>
           This was wrong

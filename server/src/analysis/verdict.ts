@@ -1,7 +1,7 @@
 import type { AiVerdictFields } from '../db/analysisRequestsStore.js';
 
 // Guardrails on an AI verdict, checked before it is recorded. Pure: callers
-// supply the sink-derived count and the set of citable playbook entries.
+// supply the sink-derived count and the sets of citable playbook entries.
 
 // Narrows the store's AiVerdictFields to what the MCP tool accepts, so a
 // validated input can be recorded as-is.
@@ -16,11 +16,10 @@ export interface VerdictContext {
   // null = sink unavailable (no DB, or a query against it failed).
   unblockedIpsAlertsSinceDecision: number | null;
   activeEntryIds: ReadonlySet<number>;
+  // The active entries whose current text the operator wrote or approved, as
+  // opposed to shipped default text.
+  operatorBackedEntryIds: ReadonlySet<number>;
 }
-
-// Phase A has no playbook, so nothing is citable yet. Phase C replaces this
-// with a playbook_entries lookup.
-export const PHASE_A_ACTIVE_ENTRY_IDS: ReadonlySet<number> = new Set();
 
 const isBlank = (s: string | undefined | null) => !s || s.trim() === '';
 
@@ -38,14 +37,19 @@ export function validateAiVerdict(input: AiVerdictInput, ctx: VerdictContext): s
   if (bad.length > 0) {
     return `cited_entries contains unknown or inactive playbook entries: ${bad.join(', ')}`;
   }
-  if (input.verdict === 'close' && cited.length === 0) {
-    const unblocked = ctx.unblockedIpsAlertsSinceDecision;
-    if (unblocked === null) {
-      return 'sink DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention';
-    }
-    if (unblocked > 0) {
-      return `${unblocked} IPS alert(s) since the last decision were not blocked; closing requires a cited playbook entry`;
-    }
+  if (input.verdict !== 'close') return null;
+
+  // Closing unblocked or unverifiable traffic takes an entry the operator stands
+  // behind: shipped default text names no host, so it can't justify it alone.
+  const unblocked = ctx.unblockedIpsAlertsSinceDecision;
+  if (unblocked === 0) return null;
+  if (cited.length === 0) {
+    return unblocked === null
+      ? 'sink DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention'
+      : `${unblocked} IPS alert(s) since the last decision were not blocked; closing requires a cited playbook entry`;
+  }
+  if (!cited.some((id) => ctx.operatorBackedEntryIds.has(id))) {
+    return "a shipped default can't by itself justify closing unblocked or unverifiable traffic; cite an operator-written entry or choose attention";
   }
   return null;
 }

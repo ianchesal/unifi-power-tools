@@ -951,3 +951,140 @@ footer {
   min-width: 200px;
   max-width: 360px;
 }
+
+/* Playbook */
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.nav-link:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+.nav-badge {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--warning-soft);
+  color: #f7c860;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+}
+.playbook-tag {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: #7fb2ee;
+}
+.playbook-tag.muted {
+  background: var(--surface-3);
+  color: var(--text-secondary);
+}
+.playbook-tag.exposed {
+  background: var(--warning-soft);
+  color: #f7c860;
+}
+.entry-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.playbook-entry.is-linked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .diff-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.diff-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 12px 14px;
+}
+.diff-col.proposed {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.diff-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+.evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.evidence-key {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.change-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.change-log li {
+  display: grid;
+  grid-template-columns: 72px 72px 200px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+.change-status {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+.change-status.accepted {
+  color: var(--good);
+}
+.change-status.rejected {
+  color: #f28c88;
+}
+@media (max-width: 700px) {
+  .change-log li {
+    grid-template-columns: 72px 1fr;
+  }
+}
+.registry-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.relied-on {
+  overflow-wrap: anywhere;
+}

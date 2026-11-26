@@ -11,7 +11,14 @@ const TABS = [
 
 type Tab = (typeof TABS)[number]['key'];
 
-export function FindingsSection({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+interface ListProps {
+  refreshKey: number;
+  // Playbook entry id → title, for the entries an analysis relied on.
+  entryTitles: ReadonlyMap<number, string>;
+  onChanged: () => void;
+}
+
+export function FindingsSection({ refreshKey, entryTitles, onChanged }: ListProps) {
   const [tab, setTab] = useState<Tab>('attention');
 
   return (
@@ -34,15 +41,15 @@ export function FindingsSection({ refreshKey, onChanged }: { refreshKey: number;
       </div>
 
       {tab === 'attention' ? (
-        <AttentionList refreshKey={refreshKey} onChanged={onChanged} />
+        <AttentionList refreshKey={refreshKey} entryTitles={entryTitles} onChanged={onChanged} />
       ) : (
-        <ClosedList refreshKey={refreshKey} onChanged={onChanged} />
+        <ClosedList refreshKey={refreshKey} entryTitles={entryTitles} onChanged={onChanged} />
       )}
     </div>
   );
 }
 
-function AttentionList({ refreshKey, onChanged }: { refreshKey: number; onChanged: () => void }) {
+function AttentionList({ refreshKey, entryTitles, onChanged }: ListProps) {
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -71,6 +78,7 @@ function AttentionList({ refreshKey, onChanged }: { refreshKey: number; onChange
           <AttentionCard
             key={f.id}
             finding={f}
+            entryTitles={entryTitles}
             error={failure?.id === f.id ? failure.message : null}
             onChanged={() => {
               setFailure(null);

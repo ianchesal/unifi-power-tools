@@ -24,6 +24,23 @@ function parseCitedEntries(raw: string | null): number[] {
   }
 }
 
+// The playbook entries an analysis cited, linked to the Playbook page.
+export function ReliedOn({ raw, titles }: { raw: string | null; titles: ReadonlyMap<number, string> }) {
+  const ids = [...new Set(parseCitedEntries(raw))];
+  if (ids.length === 0) return null;
+  return (
+    <p className="muted-line relied-on">
+      Relied on:{' '}
+      {ids.map((id, i) => (
+        <span key={id}>
+          {i > 0 && ', '}
+          <a href={`/playbook#entry-${id}`}>{titles.get(id) ?? `entry #${id}`}</a>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 type CloseKind = 'handled' | 'not_concern';
 
 // `error` is the message from this card's last failed action (owned by the
@@ -32,12 +49,14 @@ type CloseKind = 'handled' | 'not_concern';
 // action; `onChanged` is called after a successful action.
 export function AttentionCard({
   finding,
+  entryTitles,
   error,
   onChanged,
   onFailed,
   onClearError,
 }: {
   finding: Finding;
+  entryTitles: ReadonlyMap<number, string>;
   error: string | null;
   onChanged: () => void;
   onFailed: (message: string) => void;
@@ -84,7 +103,6 @@ export function AttentionCard({
   const reanalyze = () => run(() => postJson(`/api/findings/${finding.id}/reanalyze`));
 
   const reopenNote = finding.latest_reopen_note;
-  const cited = hasRecommendation ? parseCitedEntries(analysis.cited_entries) : [];
   const risk = analysis?.risk_level ?? null;
 
   return (
@@ -117,9 +135,7 @@ export function AttentionCard({
               {analysis.why_now}
             </p>
           )}
-          {cited.length > 0 && (
-            <p className="muted-line">Cites playbook entries {cited.map((id) => `#${id}`).join(', ')}</p>
-          )}
+          <ReliedOn raw={analysis.cited_entries} titles={entryTitles} />
           {analysis.recommendation && (
             <details className="reasoning">
               <summary>Full reasoning</summary>

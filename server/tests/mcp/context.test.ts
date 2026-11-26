@@ -35,7 +35,7 @@ function ipFinding(db: LensDb): Finding {
 }
 
 const ok = { verdict: 'close', risk_level: 'low', summary: 'earlier', reasoning: 'r' } as const;
-const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<number>() };
+const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<number>(), operatorBackedEntryIds: new Set<number>() };
 
 describe('buildAnalysisContext', () => {
   it('builds history, prior analyses and since_last_decision counts', async () => {

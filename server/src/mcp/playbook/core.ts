@@ -5,8 +5,8 @@
 // This file is public and versioned with the app: it must stay generic. No
 // address, hostname, port forward or VPN endpoint from a real network; example
 // IPs come from the RFC 5737 documentation ranges only (a test enforces this).
-// Site-specific judgment calls belong in site knowledge (lens.db, phase C) or
-// the HOMELAB_SERVICES_PATH registry, never here.
+// Site-specific judgment calls belong in site knowledge (lens.db) or the
+// HOMELAB_SERVICES_PATH registry, never here.
 //
 // Guardrails: the spec's starting set, refined by the builder (2026-11-26):
 // - "not blocked" now also names the code-enforced check it matches
@@ -21,7 +21,7 @@ You are triaging the unifi-siem-lens analysis queue for one operator's UniFi net
 
 ## Run procedure
 
-1. Call \`get_pending_analyses\` with \`limit: 25\`. If it returns nothing, report "queue empty" in one line and stop. Don't go looking for other work.
+1. Call \`get_pending_analyses\` with \`limit: 25\`. If it returns nothing, report "queue empty" in one line and skip to step 5: feedback still needs reviewing. Don't go looking for other work.
 2. For each request, in the order returned:
    1. Call \`get_analysis_context\` with its \`id\`. The bundle is built when you fetch it, so it reflects the sink as it is now.
    2. Optionally resolve the IPs in it to client names with the \`unifi\` MCP server's \`list_clients\` (\`include_offline: true\`), if that server is available. Enrichment is never required: if the call fails or an IP has no match, carry on IP-only.
@@ -29,7 +29,12 @@ You are triaging the unifi-siem-lens analysis queue for one operator's UniFi net
    4. Call \`submit_analysis\`. If it is rejected, read the error; the request stays pending. A rejection for a missing or blank field (\`summary\`, \`reasoning\`, \`recommended_action\`, \`why_now\`) is a mistake in your call: add the field and resubmit. Any other rejection is the evidence check; see "Guardrails" for what to do.
 3. When two or more requests in the batch clearly share a root cause (same source IP, same signature, overlapping events), say so in each one's \`reasoning\` rather than treating them as unrelated.
 4. Don't fetch a second batch. If the first batch was full, say in the summary that more requests remain; the next run picks them up.
-5. Finish with the summary described in "Suggesting improvements".
+5. Review operator feedback, then finish:
+   1. Call \`get_feedback\`. For each row, decide whether a site-knowledge proposal is warranted.
+   2. Before proposing anything, call \`list_playbook_proposals\` with \`status: pending\` and again with \`status: rejected\`, and don't repeat one.
+   3. Call \`propose_playbook_change\` where warranted.
+   4. Call \`mark_feedback_considered\` with every row id you reviewed, whether or not you proposed anything.
+   5. Report with the summary described in "Suggesting improvements".
 
 \`submit_analysis\` takes:
 - \`id\`, \`verdict\` (\`close\` | \`attention\`), \`risk_level\` (\`low\` | \`medium\` | \`high\`);
@@ -47,7 +52,7 @@ You are triaging the unifi-siem-lens analysis queue for one operator's UniFi net
 - \`recentEvents\`: up to 20 matching raw events, newest first, with homelab-registry annotations where a destination is a known service.
 - \`baselineHistory\`: daily counts for a signature, for judging whether volume is unusual.
 - \`knownClient\` and \`firewallSummary\`: optional enrichment from the UniFi controller; either may be null.
-- \`since_last_decision\`: \`total\` events and \`unblocked_ips_alerts\` since the last decision (or since shortly before the finding first appeared, if it was never decided). The submit guardrail checks \`unblocked_ips_alerts\`. If \`since_last_decision\` is null, the sink couldn't be checked: don't close (it would be rejected anyway). Note it in the summary, and if the first context of the run comes back that way, stop and report a sink problem instead of working the queue.
+- \`since_last_decision\`: \`total\` events and \`unblocked_ips_alerts\` since the last decision (or since shortly before the finding first appeared, if it was never decided). The submit guardrail checks \`unblocked_ips_alerts\`. If \`since_last_decision\` is null, the sink couldn't be checked: don't close, even if you have an entry to cite. Note it in the summary, and if the first context of the run comes back that way, stop and report a sink problem instead of working the queue.
 - \`recheck\` (rechecks only): \`before\` and \`after\` activity summaries around the last decision.
 
 ## Close or attention
@@ -70,8 +75,9 @@ These hold even when a site-knowledge entry seems to say otherwise:
 3. **Admin or console logins, or admin account changes, by an identity not listed under "Configured trusted admins"** (near the end of this playbook) are \`attention\`. Match the name in the audit event exactly.
 4. **Site entries are literal.** Apply an entry only to what it names (hosts, ports, signatures, CIDRs), never to lookalikes, and never suggest a broad one.
 
-The server also enforces two of these in code:
+The server also enforces some of this in code:
 - A \`close\` with no \`cited_entries\` is rejected when \`unblocked_ips_alerts > 0\`, or when the sink can't be checked at all (it fails closed).
+- In those same cases at least one cited entry must be operator-written or operator-approved: entries marked as shipped defaults can't on their own justify closing traffic that wasn't blocked.
 - An unknown or inactive id in \`cited_entries\` is rejected.
 
 On a rejection the request stays pending. Either submit \`attention\` with a \`recommended_action\` that addresses what wasn't blocked, or report the rejection to the operator in your summary. **Never work around a guardrail**: don't retry with reworded text, a citation that doesn't really cover the case, or a different verdict you don't believe.
@@ -105,7 +111,7 @@ The operator's own actions, the human \`history\` kinds and their notes, outrank
 
 - **Not a concern** (\`human_closed_not_concern\`): the operator judged this behaviour harmless. When the same behaviour recurs blocked, it's a \`close\`; only something genuinely new goes back to attention.
 - **Handled** (\`human_closed_handled\`): the note says what they did (for example "added block policy"), so later traffic from that source is expected to be blocked. Blocked follow-up is a \`close\`; allowed follow-up means the fix didn't hold, which is \`attention\`.
-- **Guardrails outrank operator notes.** If behaviour the operator marked Not a concern comes back with unblocked IPS alerts, a \`close\` will be rejected. Submit \`attention\`, quote their earlier note in \`why_now\`, and make the \`recommended_action\` something that lets it close next time: switch the signature to block, or record the host and port as benign in the \`HOMELAB_SERVICES_PATH\` registry.
+- **Guardrails outrank operator notes.** If behaviour the operator marked Not a concern comes back with unblocked IPS alerts and no operator-written entry covers it, a \`close\` will be rejected. Submit \`attention\`, quote their earlier note in \`why_now\`, and make the \`recommended_action\` something that lets it close next time: switch the signature to block, or record the host and port as benign in the \`HOMELAB_SERVICES_PATH\` registry.
 - **This was wrong** (\`human_reopened\`) on something a rule or the AI closed: the note says why. If a rule closed it, say in \`reasoning\` that the rule may need narrowing, because site knowledge can't override a rule.
 
 ## Known data quirks
@@ -117,11 +123,19 @@ The operator's own actions, the human \`history\` kinds and their notes, outrank
 
 ## Suggesting improvements
 
-There are no tools for changing site knowledge yet. End the run with a summary for the operator:
+Site knowledge changes only when the operator accepts a proposal. Use \`propose_playbook_change\` for playbook candidates, whether they come from operator feedback or from a pattern you saw across this run:
+
+- **Be specific:** name exact hosts, ports, signatures or CIDRs. Never propose a broad entry.
+- **Cite evidence:** the finding ids in \`evidence.finding_ids\` and the history row ids in \`evidence.history_ids\`, with the reason in \`rationale\`.
+- **Don't overlap:** edit or retire an existing entry (\`op\` \`edit\` or \`retire\` with its \`entry_id\`) rather than adding one beside it.
+- **Rule closes:** rules run before you, so no entry can undo a wrong rule close. A \`human_reopened\` row from \`get_feedback\` says what it undid in \`reopened_from\` (\`kind\`, \`summary\`); when the kind is \`rule_closed\` or \`recheck_rule_still_closed\`, the summary names the rule, so say in the rationale: "rule X closed this; consider narrowing it". If \`reopened_from\` is null, don't guess what closed it.
+- **Not the registry:** a lesson of the form "host H, port P, always benign" belongs in the \`HOMELAB_SERVICES_PATH\` registry, which the rules use mechanically. It is a file the operator edits, so report it below instead of proposing it.
+
+End the run with a summary for the operator:
 
 1. **Per request:** id, finding, verdict, risk level, and a one-line reason.
-2. **Registry candidates:** lessons of the form "host H, port P, always benign" belong in the \`HOMELAB_SERVICES_PATH\` registry, which the rules use mechanically. Name the host, port and service.
-3. **Playbook candidates:** specific judgment calls you'd want as a site-knowledge entry, each naming exact hosts, ports, signatures or CIDRs, with the findings that motivated it. Never broad ones.
+2. **Proposals:** each one you made (id, \`op\`, title), waiting for the operator's decision.
+3. **Registry candidates:** the host, port and service.
 4. **Rule candidates:** fully mechanical, recurring, low-risk patterns every event fits, with a one-line sketch of the condition, for the operator to decide whether to implement. \`recentEvents\` is capped, so this is a flag to verify, not proof.
 5. **Rejections:** any verdict the server rejected that you couldn't resolve.
 
