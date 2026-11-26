@@ -1088,3 +1088,41 @@ footer {
 .relied-on {
   overflow-wrap: anywhere;
 }
+
+/* Sign-in screen */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 360px;
+  padding: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.login-card .brand {
+  margin-bottom: 8px;
+}
+.login-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.login-error {
+  margin: 0;
+  font-size: 13px;
+  color: var(--critical);
+}
+.signout-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}

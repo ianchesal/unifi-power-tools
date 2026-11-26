@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { errorMessage, postJson } from '../api';
 
 interface BackfillResult {
   checked: number;
@@ -33,11 +34,9 @@ export function AdminPage() {
     setRunning(true);
     setError(null);
     try {
-      const res = await fetch('/api/admin/backfill-rule-triage', { method: 'POST' });
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      setResult(await res.json());
+      setResult(await postJson<BackfillResult>('/api/admin/backfill-rule-triage'));
     } catch (e) {
-      setError(String(e));
+      setError(errorMessage(e));
     } finally {
       setRunning(false);
     }

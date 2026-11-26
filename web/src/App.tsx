@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { fetchJson } from './api';
+import { checkSession, fetchJson, logout, onUnauthorized } from './api';
 import { AdminPage } from './components/AdminPage';
 import { EventsOverTimeChart } from './components/EventsOverTimeChart';
 import { FindingsSection } from './components/FindingsSection';
 import { KpiStats } from './components/KpiStats';
+import { LoginPage } from './components/LoginPage';
 import { PlaybookPage } from './components/PlaybookPage';
 import { QueueStrip } from './components/QueueStrip';
 import { SeverityChart } from './components/SeverityChart';
@@ -14,7 +15,8 @@ import type { Playbook, PlaybookProposal, QueueStats } from './types';
 
 interface Health {
   status: 'ok' | 'degraded';
-  sinkDb: 'available' | 'unavailable';
+  syslog: { bound: boolean; droppedMessages: number };
+  eventsDb: 'ok' | 'error';
 }
 
 const RANGES = [
@@ -24,6 +26,21 @@ const RANGES = [
 ];
 
 export default function App() {
+  // null while the session check is in flight.
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    // Any API call that comes back 401 (e.g. the cookie expired mid-use)
+    // drops back to the login screen.
+    onUnauthorized(() => setSignedIn(false));
+    checkSession()
+      .then(setSignedIn)
+      .catch(() => setSignedIn(false));
+  }, []);
+
+  if (signedIn === null) return null;
+  if (!signedIn) return <LoginPage onSignedIn={() => setSignedIn(true)} />;
+
   if (window.location.pathname === '/admin') {
     return <AdminPage />;
   }
@@ -31,10 +48,10 @@ export default function App() {
     return <PlaybookPage />;
   }
 
-  return <Dashboard />;
+  return <Dashboard onSignOut={() => logout().finally(() => setSignedIn(false))} />;
 }
 
-function Dashboard() {
+function Dashboard({ onSignOut }: { onSignOut: () => void }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [sinceDays, setSinceDays] = useState(7);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -63,7 +80,7 @@ function Dashboard() {
       .catch(() => {});
   }, [refreshKey]);
 
-  const sinkAvailable = health?.sinkDb === 'available';
+  const ingestOk = health?.status === 'ok';
 
   return (
     <>
@@ -87,12 +104,21 @@ function Dashboard() {
           <a className="icon-btn" href="/admin" aria-label="Admin">
             <SettingsIcon />
           </a>
-          <div className={`status-pill${sinkAvailable ? '' : ' offline'}`}>
+          <div className={`status-pill${ingestOk ? '' : ' offline'}`}>
             <span className="status-dot" />
-            {health === null ? 'Checking sink…' : sinkAvailable ? 'Sink connected' : 'Sink unavailable'}
+            {health === null
+              ? 'Checking ingest…'
+              : ingestOk
+                ? 'Syslog listening'
+                : !health.syslog.bound
+                  ? 'Syslog not listening'
+                  : 'Events DB error'}
           </div>
           <button className="icon-btn" type="button" aria-label="Refresh" onClick={bumpRefresh}>
             <RefreshIcon />
+          </button>
+          <button className="nav-link signout-btn" type="button" onClick={onSignOut}>
+            Sign out
           </button>
         </div>
       </div>
