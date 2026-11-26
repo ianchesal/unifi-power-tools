@@ -124,8 +124,8 @@ attention) back, which then shows up next to the finding. See
 | `GET /api/analysis-requests` | Pending requests, or all of a finding's with `?findingId=`. |
 | `GET /api/queue` | AI queue stats for the queue strip. |
 | `POST /api/admin/backfill-rule-triage` | Re-checks every never-decided `triaging` finding against the auto-triage rules; returns `{ checked, closed, byRule }`. |
-| `GET /api/playbook` | `{ entries, registry }`: active entries first, then retired, plus the homelab registry. `is_default` marks an active entry that is still shipped default text. |
-| `GET /api/playbook/proposals` | Proposals, newest first (`status=pending\|accepted\|rejected`, optional), each with the findings cited as evidence and the entry it would change. |
+| `GET /api/playbook` | `{ entries, registry }`: active entries first, then retired, plus the homelab registry. `is_default` marks an active entry that is still shipped default text; it is also true for every retired entry, so only active ones should be labelled. |
+| `GET /api/playbook/proposals` | Proposals, newest first (`status=pending\|accepted\|rejected`, optional), each with the findings cited as evidence (`missing_evidence_count` counts cited findings that no longer exist) and the entry it would change. |
 | `POST /api/playbook/proposals` | Add an entry yourself: `{ title, body }`. |
 | `POST /api/playbook/proposals/:id/accept` | Apply a pending proposal, optionally with your own text: `{ edited_title?, edited_body? }`. |
 | `POST /api/playbook/proposals/:id/reject` | Reject a pending proposal: `{ note? }`. |

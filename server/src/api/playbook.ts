@@ -21,7 +21,8 @@ const ERROR_STATUS = { not_found: 404, conflict: 409, invalid: 400 } as const;
 
 const text = z.string().trim().min(1);
 const EntryBody = z.object({ title: text, body: text });
-const AcceptBody = z.object({ edited_title: text.optional(), edited_body: text.optional() });
+// Strict: a misspelled field must fail rather than accept the unedited text.
+const AcceptBody = z.strictObject({ edited_title: text.optional(), edited_body: text.optional() });
 const NoteBody = z.object({ note: z.string().trim().optional() });
 
 // A proposal with what the operator needs to judge it: the findings behind it,
@@ -37,6 +38,9 @@ function withContext(db: LensDb, proposal: PlaybookProposal, entries: Map<number
   return {
     ...proposal,
     evidence_findings: evidenceFindings,
+    // Cited findings that no longer exist, so the page can say so instead of
+    // silently showing less evidence than the proposal claims.
+    missing_evidence_count: proposal.evidence.finding_ids.length - evidenceFindings.length,
     current: entry ? { title: entry.title, body: entry.body, status: entry.status } : null,
   };
 }
@@ -100,7 +104,12 @@ export function createPlaybookRouter(lensDb: LensDb, homelabServices: HomelabReg
   router.post('/proposals/:id/accept', (req, res) => {
     const id = parseId(req, res);
     if (id === null) return;
-    const body = parseBody(AcceptBody, req, res, 'edited_title and edited_body must not be blank');
+    const body = parseBody(
+      AcceptBody,
+      req,
+      res,
+      'the body may hold only edited_title and edited_body, and neither may be blank'
+    );
     if (!body) return;
     const edits = { title: body.edited_title, body: body.edited_body };
     act(res, 200, (now) => acceptProposal(lensDb, id, edits, now));

@@ -43,12 +43,13 @@ function Dashboard() {
   const [entryTitles, setEntryTitles] = useState<ReadonlyMap<number, string>>(new Map());
   const bumpRefresh = () => setRefreshKey((k) => k + 1);
 
-  // Once per page load: cards name the entries an analysis relied on.
+  // Cards name the entries an analysis relied on; refetched on every refresh
+  // so an added or retitled entry shows without a page reload.
   useEffect(() => {
     fetchJson<Playbook>('/api/playbook')
       .then(({ entries }) => setEntryTitles(new Map(entries.map((e) => [e.id, e.title]))))
       .catch(() => {});
-  }, []);
+  }, [refreshKey]);
 
   useEffect(() => {
     fetchJson<Health>('/health').then(setHealth).catch(() => setHealth(null));

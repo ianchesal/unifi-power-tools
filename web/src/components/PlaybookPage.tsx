@@ -156,6 +156,9 @@ function ProposalChange({ proposal }: { proposal: PlaybookProposal }) {
   if (!current) {
     return <p className="action-error">The entry this changes no longer exists; reject this proposal.</p>;
   }
+  if (op === 'retire' && current.status === 'retired') {
+    return <p className="action-error">This entry is already retired; reject this proposal.</p>;
+  }
   if (op === 'retire') return <EntryText title={current.title} body={current.body} />;
   return (
     <>
@@ -180,6 +183,11 @@ function ProposalCard({ proposal, ...actions }: { proposal: PlaybookProposal } &
   const [mode, setMode] = useState<'edit' | 'reject' | null>(null);
   const { busy, run, error } = useAction(`proposal-${proposal.id}`, actions);
   const url = `/api/playbook/proposals/${proposal.id}`;
+  // The server rejects accepting a change to a vanished entry, or a retire of an
+  // already retired one; ProposalChange tells the operator to reject those.
+  const acceptable =
+    proposal.op === 'add' ||
+    (proposal.current !== null && !(proposal.op === 'retire' && proposal.current.status === 'retired'));
   // A proposal may cite the same finding twice.
   const evidence = [...new Map(proposal.evidence_findings.map((f) => [f.id, f])).values()];
   const close = () => {
@@ -212,6 +220,12 @@ function ProposalCard({ proposal, ...actions }: { proposal: PlaybookProposal } &
           accept with your own changes makes it yours.
         </p>
       )}
+      {proposal.missing_evidence_count > 0 && (
+        <p className="muted-line">
+          {proposal.missing_evidence_count} cited finding{proposal.missing_evidence_count === 1 ? '' : 's'} no
+          longer exist{proposal.missing_evidence_count === 1 ? 's' : ''}.
+        </p>
+      )}
       {evidence.length > 0 && (
         <div className="evidence-list">
           <span className="diff-label">Evidence</span>
@@ -221,11 +235,13 @@ function ProposalCard({ proposal, ...actions }: { proposal: PlaybookProposal } &
         </div>
       )}
       <div className="finding-actions">
-        <button className="btn btn-primary" type="button" disabled={busy} onClick={() => accept({})}>
-          Accept
-        </button>
+        {acceptable && (
+          <button className="btn btn-primary" type="button" disabled={busy} onClick={() => accept({})}>
+            Accept
+          </button>
+        )}
         {/* A retire applies no text, so there is nothing to edit. */}
-        {proposal.op !== 'retire' && (
+        {acceptable && proposal.op !== 'retire' && (
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => open('edit')}>
             Edit &amp; accept
           </button>

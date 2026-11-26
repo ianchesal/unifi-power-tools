@@ -147,6 +147,8 @@ export interface PlaybookProposal {
   decided_at: string | null;
   decision_note: string | null;
   evidence_findings: EvidenceFinding[];
+  // Cited findings that no longer exist (not in evidence_findings).
+  missing_evidence_count: number;
   // The entry an edit or retire acts on, as it is now; null for an add.
   current: { title: string; body: string; status: PlaybookEntry['status'] } | null;
 }
