@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { EventRow } from '../ingest/parser/normalize.js';
 import { reparseClientEvents } from './reparseClientEvents.js';
 
-// The events table (syslog/CEF ingest), formerly unifi-siem-sink's database.
+// The events table (syslog/CEF ingest).
 // Two connections in production: EventsWriter (ingest and the retention purge
 // only) and a read-only EventsDb for analysis, /api and /mcp, so code handling
 // attacker-influenced event text can't write events.

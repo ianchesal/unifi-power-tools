@@ -8,7 +8,7 @@ import { toolError, toolResult } from './tools.js';
 // The learning loop's MCP surface. Claude can read feedback and propose changes;
 // only the operator, on the dashboard, can apply one.
 
-const IMPORT_KNOWLEDGE_PROMPT = `Import the triage knowledge you hold in your own memory or notes into unifi-siem-lens.
+const IMPORT_KNOWLEDGE_PROMPT = `Import the triage knowledge you hold in your own memory or notes into unifi-power-tools.
 
 First call \`get_playbook\` and \`list_playbook_proposals\`, so you edit existing entries instead of duplicating them and don't repeat a pending or rejected proposal.
 

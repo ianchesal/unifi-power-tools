@@ -19,7 +19,7 @@ function makeCef(overrides: Partial<CefMessage> = {}): CefMessage {
 }
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-test-'));
+  dir = await mkdtemp(join(tmpdir(), 'upt-test-'));
   db = openEventsWriter(join(dir, 'events.db'));
 
   insertEvent(db, normalize(

@@ -143,7 +143,7 @@ describe('MCP analysis tools', () => {
     const client = await connectedClient(lensDb, { conn });
     const res = await call(client, 'submit_analysis', { id: request.id, ...close });
     expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/sink DB unavailable/);
+    expect(res.text).toMatch(/events DB unavailable/);
   });
 
   it('submit_analysis on an unknown request reports not found', async () => {

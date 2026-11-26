@@ -26,7 +26,7 @@ import {
 import type { UnifiEnricher } from '../enrichment/unifiEnricher.js';
 
 // The bundle a Claude Code session reasons over, built when the request is
-// fetched (not when it is queued) so it reflects the sink as it is now.
+// fetched (not when it is queued) so it reflects the events as they are now.
 
 const RECENT_EVENTS_LIMIT = 20;
 const BASELINE_HISTORY_LIMIT = 14;

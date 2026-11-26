@@ -307,7 +307,7 @@ describe('GET /api/findings/:id/activity', () => {
 
 describe('findings API — client findings', () => {
   const MAC = 'aa:aa:aa:aa:aa:01';
-  function clientSinkDb(rows: { mac: string; name: string | null; source_ip?: string | null; category?: string }[]): EventsDb {
+  function clientEventsDb(rows: { mac: string; name: string | null; source_ip?: string | null; category?: string }[]): EventsDb {
     const conn = new DatabaseSync(':memory:');
     conn.exec(`CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
   category TEXT, subcategory TEXT, severity INTEGER, name TEXT, source_ip TEXT,
@@ -332,7 +332,7 @@ describe('findings API — client findings', () => {
   }
 
   it('attaches display_name to client findings in both response shapes', async () => {
-    const { app } = appWith(clientSinkDb([{ mac: MAC, name: 'tranquility' }]));
+    const { app } = appWith(clientEventsDb([{ mac: MAC, name: 'tranquility' }]));
 
     const bare = await request(app).get('/api/findings');
     const clientItem = bare.body.find((f: { entity_type: string }) => f.entity_type === 'client');
@@ -354,7 +354,7 @@ describe('findings API — client findings', () => {
 
   it('GET /findings/:id/activity returns events for a client finding by MAC', async () => {
     const { app, client } = appWith(
-      clientSinkDb([
+      clientEventsDb([
         { mac: MAC, name: 'tranquility' },
         { mac: MAC, name: 'tranquility', category: 'firewall_block' },
         { mac: 'aa:aa:aa:aa:aa:09', name: 'other' },

@@ -14,7 +14,7 @@ export const NON_SECURITY_OPERATIONAL_CATEGORIES = [
 export const LOW_SIGNAL_SYSTEM_CATEGORIES = ['system', 'adminactivity', 'detection'];
 
 // Matches the sink's fixed audit-log template exactly (see
-// unifi-siem-sink's normalize.ts UNIFIcategory=Audit / "Network Accessed"
+// ingest/parser/normalize.ts's UNIFIcategory=Audit / "Network Accessed"
 // event shape). Anchored full-string match, not a substring/includes check
 // — a name mentioned mid-sentence in an unrelated message must not match.
 const AUDIT_LOGIN_PATTERN =

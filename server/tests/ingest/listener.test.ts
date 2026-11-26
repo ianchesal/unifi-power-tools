@@ -12,7 +12,7 @@ let listener: SyslogListener;
 const PORT = 31514;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-test-'));
+  dir = await mkdtemp(join(tmpdir(), 'upt-test-'));
   db = openEventsWriter(join(dir, 'events.db'));
   listener = await startSyslogListener(db, { port: PORT, bindAddress: '127.0.0.1', maxMessageBytes: 100 });
 });
@@ -98,7 +98,7 @@ describe('startSyslogListener', () => {
   it('does not crash the process on a runtime socket error', async () => {
     const createSocketSpy = vi.spyOn(dgram, 'createSocket');
     const otherDb = await (async () => {
-      const otherDir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-test-'));
+      const otherDir = await mkdtemp(join(tmpdir(), 'upt-test-'));
       return { dir: otherDir, db: openEventsWriter(join(otherDir, 'events.db')) };
     })();
     const otherListener = await startSyslogListener(otherDb.db, {

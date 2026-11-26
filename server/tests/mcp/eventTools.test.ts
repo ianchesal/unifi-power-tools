@@ -15,7 +15,7 @@ let dir: string;
 let db: EventsWriter;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-test-'));
+  dir = await mkdtemp(join(tmpdir(), 'upt-test-'));
   db = openEventsWriter(join(dir, 'events.db'));
   insertEvent(db, unparsedEvent('event-1', '2026-08-28T10:00:00.000Z'));
 });

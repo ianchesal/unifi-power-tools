@@ -11,7 +11,7 @@ process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled promise rejection', reason);
 });
 
-logger.info('Starting unifi-siem-lens');
+logger.info('Starting unifi-power-tools');
 
 let running: Awaited<ReturnType<typeof start>>;
 try {

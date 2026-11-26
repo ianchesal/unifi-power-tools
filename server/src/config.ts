@@ -72,7 +72,24 @@ function parseCommaList(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
+// Variables from the three pre-merge services. A stale .env must fail loudly
+// rather than half-work.
+export const REMOVED_ENV_VARS: Record<string, string> = {
+  SINK_DB_PATH: 'EVENTS_DB_PATH',
+  DB_PATH: 'EVENTS_DB_PATH',
+  MCP_PORT: 'PORT',
+  MCP_HOST: 'HOST',
+  UNIFI_MCP_SERVER_URL: '(removed: UniFi is built in; set UNIFI_HOST and UNIFI_API_KEY)',
+  UNIFI_MCP_SERVER_TOKEN: '(removed: UniFi is built in; set UNIFI_HOST and UNIFI_API_KEY)',
+};
+
 export function loadConfig(): Config {
+  for (const [name, replacement] of Object.entries(REMOVED_ENV_VARS)) {
+    if (process.env[name] !== undefined) {
+      throw new Error(`${name} is no longer used; use ${replacement}`);
+    }
+  }
+
   if (!process.env.MCP_SECRET?.trim()) {
     throw new Error('Missing required environment variable: MCP_SECRET');
   }

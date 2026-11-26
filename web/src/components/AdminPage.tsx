@@ -47,7 +47,7 @@ export function AdminPage() {
       <div className="page-head">
         <div>
           <h1 className="page-title">Admin</h1>
-          <p className="page-subtitle">Maintenance actions for unifi-siem-lens</p>
+          <p className="page-subtitle">Maintenance actions for unifi-power-tools</p>
         </div>
       </div>
 

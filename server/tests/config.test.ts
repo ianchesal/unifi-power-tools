@@ -103,6 +103,19 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow(/TRUST_PROXY/);
   });
 
+  it.each([
+    ['SINK_DB_PATH', 'EVENTS_DB_PATH'],
+    ['DB_PATH', 'EVENTS_DB_PATH'],
+    ['MCP_PORT', 'PORT'],
+    ['MCP_HOST', 'HOST'],
+    ['UNIFI_MCP_SERVER_URL', 'UNIFI_HOST and UNIFI_API_KEY'],
+    ['UNIFI_MCP_SERVER_TOKEN', 'UNIFI_HOST and UNIFI_API_KEY'],
+  ])('rejects the removed %s, naming %s', (name, replacement) => {
+    process.env[name] = 'stale';
+    expect(() => loadConfig()).toThrow(`${name} is no longer used`);
+    expect(() => loadConfig()).toThrow(replacement);
+  });
+
   describe('UniFi', () => {
     beforeEach(() => {
       for (const k of ['UNIFI_HOST', 'UNIFI_API_KEY', 'UNIFI_SITE', 'UNIFI_VERIFY_TLS', 'UNIFI_REQUEST_TIMEOUT_MS', 'UNIFI_ALLOW_WRITES']) {

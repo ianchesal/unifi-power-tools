@@ -1,3 +1,5 @@
+> Note (2026-11-26): the sink and UniFi MCP server have since been merged into this service; see 2026-11-26-unifi-power-tools-merge-design.md. References here to a read-only sink DB or enrichment over MCP describe the old split.
+
 # Findings triage redesign: attention queue + learning playbook
 
 Date: 2026-11-25

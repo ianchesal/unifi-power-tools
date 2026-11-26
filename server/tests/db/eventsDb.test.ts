@@ -10,7 +10,7 @@ let dbPath: string;
 let db: EventsWriter;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-test-'));
+  dir = await mkdtemp(join(tmpdir(), 'upt-test-'));
   dbPath = join(dir, 'events.db');
   db = openEventsWriter(dbPath);
 });
@@ -143,7 +143,7 @@ describe('source_client_mac index (migration 4)', () => {
     expect(row?.sql).toMatch(/WHERE\s+source_client_mac IS NOT NULL/i);
   });
 
-  // The three query shapes unifi-siem-lens runs against this column (issue #44).
+  // The three query shapes the analysis layer runs against this column (issue #44).
   it('is used for the client-name lookup by MAC list', () => {
     expect(
       plan(

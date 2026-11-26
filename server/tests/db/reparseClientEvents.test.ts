@@ -14,7 +14,7 @@ let dir: string;
 let db: EventsWriter;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'unifi-siem-sink-reparse-'));
+  dir = await mkdtemp(join(tmpdir(), 'upt-reparse-'));
   db = openEventsWriter(join(dir, 'events.db'));
 });
 

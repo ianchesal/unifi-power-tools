@@ -63,7 +63,7 @@ export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): vo
 
   server.tool(
     'submit_analysis',
-    "Submit a verdict for a pending analysis request: close (benign) or attention (needs a human). Closing is rejected while unblocked IPS alerts exist since the last decision (or the sink can't be checked), unless a cited playbook entry is operator-written or operator-approved.",
+    "Submit a verdict for a pending analysis request: close (benign) or attention (needs a human). Closing is rejected while unblocked IPS alerts exist since the last decision (or the events can't be checked), unless a cited playbook entry is operator-written or operator-approved.",
     {
       id: z.number().int(),
       verdict: z.enum(['close', 'attention']),

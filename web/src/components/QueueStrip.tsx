@@ -4,8 +4,8 @@ import { copyText } from '../clipboard';
 import { relativeTime } from '../format';
 import type { Finding, PendingAnalysis, QueueStats } from '../types';
 
-// The MCP prompt as Claude Code exposes it, for a server configured as `unifi-siem-lens`.
-export const TRIAGE_PROMPT = '/mcp__unifi-siem-lens__triage';
+// The MCP prompt as Claude Code exposes it, for a server configured as `unifi-power-tools`.
+export const TRIAGE_PROMPT = '/mcp__unifi-power-tools__triage';
 
 type CopyState = 'idle' | 'copied' | 'failed';
 

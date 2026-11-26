@@ -88,7 +88,7 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
         <div className="brand">
           <ShieldIcon size={28} />
           <div className="brand-text">
-            <span className="brand-name">UniFi SIEM Lens</span>
+            <span className="brand-name">UniFi Power Tools</span>
             <span className="brand-sub">Security dashboard</span>
           </div>
         </div>
@@ -167,7 +167,7 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
       </div>
 
       <footer>
-        <span className="footer-text">unifi-siem-lens · read-only analysis layer over unifi-siem-sink</span>
+        <span className="footer-text">unifi-power-tools · syslog ingest, UniFi tools and triage for one UniFi network</span>
       </footer>
     </>
   );
