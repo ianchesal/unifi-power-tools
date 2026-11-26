@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AnalysisDeps } from './context.js';
-import { assemblePlaybook } from './playbook/assemble.js';
+import { assemblePlaybook, type PlaybookOptions } from './playbook/assemble.js';
 import { registerAnalysisTools } from './tools.js';
 
 // src/mcp/server.ts and dist/mcp/server.js both sit two levels below server/.
@@ -14,7 +14,7 @@ export const SERVER_INSTRUCTIONS =
   'covers the run procedure, how to choose close or attention, and the guardrails the server enforces.';
 
 // One server per /mcp request (stateless transport), built the same way in tests.
-export function createLensMcpServer(deps: AnalysisDeps): McpServer {
+export function createLensMcpServer(deps: AnalysisDeps, playbook: PlaybookOptions): McpServer {
   const server = new McpServer(
     { name: 'unifi-siem-lens', version },
     { instructions: SERVER_INSTRUCTIONS }
@@ -29,7 +29,10 @@ export function createLensMcpServer(deps: AnalysisDeps): McpServer {
     },
     () => ({
       messages: [
-        { role: 'user' as const, content: { type: 'text' as const, text: assemblePlaybook() } },
+        {
+          role: 'user' as const,
+          content: { type: 'text' as const, text: assemblePlaybook(playbook) },
+        },
       ],
     })
   );
@@ -41,7 +44,7 @@ export function createLensMcpServer(deps: AnalysisDeps): McpServer {
       description:
         'The triage playbook: run procedure, verdict rules and guardrails. Same content as the `triage` prompt, for clients that cannot use MCP prompts. Call it first and follow it.',
     },
-    () => ({ content: [{ type: 'text' as const, text: assemblePlaybook() }] })
+    () => ({ content: [{ type: 'text' as const, text: assemblePlaybook(playbook) }] })
   );
 
   return server;

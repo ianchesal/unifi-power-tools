@@ -92,7 +92,10 @@ export function createApp(
   });
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
-    const mcpServer = createLensMcpServer({ lensDb, sinkDb, unifiMcp, homelabServices });
+    const mcpServer = createLensMcpServer(
+      { lensDb, sinkDb, unifiMcp, homelabServices },
+      { trustedAdminNames: config.trustedAdminNames }
+    );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
       transport.close();

@@ -13,7 +13,7 @@ async function connect({ sinkDb }: { sinkDb: SinkDb | null }) {
     sinkDb,
     unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
-  });
+  }, { trustedAdminNames: ['alice'] });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test-client', version: '0.1.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -35,7 +35,7 @@ describe('lens MCP server', () => {
     const res = await client.getPrompt({ name: 'triage' });
     expect(res.messages).toHaveLength(1);
     expect(res.messages[0].role).toBe('user');
-    expect((res.messages[0].content as { text: string }).text).toBe(assemblePlaybook());
+    expect((res.messages[0].content as { text: string }).text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'] }));
   });
 
   it('get_playbook returns the same text', async () => {
@@ -43,7 +43,15 @@ describe('lens MCP server', () => {
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
-    expect(res.content[0].text).toBe(assemblePlaybook());
+    expect(res.content[0].text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'] }));
+  });
+
+  it('serves the configured trusted admins in the playbook', async () => {
+    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(res.content[0].text).toMatch(/## Configured trusted admins[\s\S]*- alice/);
   });
 
   it('still serves the playbook with no sink DB (degraded mode)', async () => {
@@ -56,7 +64,7 @@ describe('lens MCP server', () => {
     const client = await connect({ sinkDb: seededSinkDb([]) });
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
     const named = new Set(
-      [...assemblePlaybook().matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
+      [...assemblePlaybook({ trustedAdminNames: ['alice'] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
     );
     // list_clients belongs to the separate `unifi` MCP server, not the lens.
     named.delete('list_clients');

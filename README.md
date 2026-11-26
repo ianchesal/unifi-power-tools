@@ -134,7 +134,9 @@ attention) back, which then shows up next to the finding. See
 The lens has no LLM access of its own. A Claude Code session does the analysis
 over MCP, guided by a **triage playbook** the lens serves: the run procedure,
 when to close and when to send a finding to Needs attention, which UniFi
-actions to recommend, and guardrails the playbook can't be talked out of. The
+actions to recommend, and guardrails the playbook can't be talked out of. It
+also lists your `TRUSTED_ADMIN_NAMES`, added at request time, so Claude
+applies the same trusted-admin rule the rules do. The
 playbook's core is code-owned (`server/src/mcp/playbook/`), so it is public and
 generic; site-specific knowledge arrives in a later release. The MCP server's
 `instructions` point any client at it.
@@ -148,8 +150,12 @@ use Claude Code, at most once a day. The run handles up to 25 queued findings
 and says so if more remain. For example, every morning at 07:00:
 
 ```cron
-0 7 * * * cd "$HOME" && claude -p "/mcp__unifi-siem-lens__triage" --allowedTools "mcp__unifi-siem-lens" >> "$HOME/lens-triage.log" 2>&1
+0 7 * * * cd "$HOME" && "$HOME/.local/bin/claude" -p "/mcp__unifi-siem-lens__triage" --allowedTools "mcp__unifi-siem-lens" >> "$HOME/lens-triage.log" 2>&1
 ```
+
+cron runs with a minimal `PATH`, so give `claude` by its absolute path. Use
+whatever `command -v claude` prints in your shell; `$HOME/.local/bin/claude`
+is the native installer's default.
 
 `--allowedTools "mcp__unifi-siem-lens"` pre-approves every tool on the lens's
 MCP server and nothing else. Add `mcp__unifi__list_clients` if you also run

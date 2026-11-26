@@ -46,9 +46,35 @@ describe('core playbook', () => {
   });
 });
 
+describe('core playbook: review fixes', () => {
+  it('says guardrails outrank an earlier Not a concern note', () => {
+    expect(CORE_PLAYBOOK).toMatch(/guardrails outrank operator notes/i);
+  });
+  it('tells Claude to fix and resubmit a missing-field rejection', () => {
+    expect(CORE_PLAYBOOK).toMatch(/missing or blank field[\s\S]{0,200}resubmit/i);
+  });
+  it('says not to close when since_last_decision is null', () => {
+    expect(CORE_PLAYBOOK).toMatch(/`since_last_decision` is null[\s\S]{0,120}don't close/i);
+  });
+  it('points the trusted-admin guardrail at the configured list section', () => {
+    expect(CORE_PLAYBOOK).toContain('"Configured trusted admins"');
+  });
+});
+
 describe('assemblePlaybook', () => {
-  it('is the core followed by the empty site-knowledge section', () => {
-    expect(assemblePlaybook()).toBe(`${CORE_PLAYBOOK}\n\n${NO_SITE_ENTRIES_SECTION}`);
+  it('lists the configured trusted admins', () => {
+    const text = assemblePlaybook({ trustedAdminNames: ['alice', 'ops-bot'] });
+    expect(text).toMatch(/## Configured trusted admins[\s\S]*- alice\n- ops-bot/);
+  });
+  it('says when no trusted admins are configured', () => {
+    expect(assemblePlaybook({ trustedAdminNames: [] })).toMatch(
+      /## Configured trusted admins\n\nNone are configured/
+    );
+  });
+  it('is the core, the trusted-admin section, then the empty site-knowledge section', () => {
+    const text = assemblePlaybook({ trustedAdminNames: [] });
+    expect(text.startsWith(`${CORE_PLAYBOOK}\n\n## Configured trusted admins`)).toBe(true);
+    expect(text.endsWith(`\n\n${NO_SITE_ENTRIES_SECTION}`)).toBe(true);
     expect(NO_SITE_ENTRIES_SECTION.startsWith('## Site knowledge')).toBe(true);
     expect(NO_SITE_ENTRIES_SECTION).toMatch(/cited_entries/);
   });
