@@ -84,8 +84,9 @@ shadow them.
   signature daily counts for anomaly detection), `seen_signatures` /
   `seen_source_ips` (first-seen tracking), `findings`, and
   `analysis_requests` (the Claude Code handoff queue), plus `seen_clients`
-  (first-seen tracking for client findings, below) and `finding_history`
-  (the per-finding audit trail, written by `pipeline.ts`).
+  (first-seen tracking for client findings, below), `finding_history`
+  (the per-finding audit trail, written by `pipeline.ts`) and the playbook
+  tables `playbook_entries`, `playbook_proposals` and `playbook_defaults_seen`.
 
 ### Analysis engine (`server/src/analysis/`)
 
@@ -162,15 +163,16 @@ with `is_recheck` set, and the verdict must then supply `why_now`.
 
 `mcp/server.ts`'s `createLensMcpServer` builds the per-request `McpServer`
 (stateless transport, one per `/mcp` request) with `instructions` pointing at
-the playbook, the analysis tools below, the `triage` prompt
-(`/mcp__unifi-siem-lens__triage`) and the `get_playbook` tool. Both serve
-`assemblePlaybook({ trustedAdminNames })` (`mcp/playbook/`): the code-owned
-core (`core.ts`), a "Configured trusted admins" section built from
-`TRUSTED_ADMIN_NAMES` at request time (site data never goes in the repo), and
-a site-knowledge section that stays empty until phase C adds `playbook_entries`.
-The core is public, so it must stay generic: no real addresses, hostnames,
-port forwards or VPN endpoints. A test rejects IPv4 literals outside RFC 5737,
-and another fails if the playbook names a lens tool that isn't registered.
+the playbook, the analysis tools below, the playbook tools (`playbookTools.ts`),
+the `triage` prompt (`/mcp__unifi-siem-lens__triage`) and the `get_playbook`
+tool. Both serve `assemblePlaybook({ trustedAdminNames, entries })`
+(`mcp/playbook/`): the code-owned core (`core.ts`), a "Configured trusted
+admins" section built from `TRUSTED_ADMIN_NAMES`, and a "Site knowledge"
+section built from the active playbook entries. Both site sections are assembled
+on each call (site data never goes in the repo). The core is public, so it must
+stay generic: no real addresses, hostnames, port forwards or VPN endpoints. A
+test rejects IPv4 literals outside RFC 5737, and another fails if the playbook
+names a lens tool that isn't registered.
 
 There is no "Analyze this" click: the pipeline queues an `analysis_requests`
 row (`queueForAnalysis`, at most one `pending` per finding) for every finding
@@ -186,16 +188,54 @@ homelab enrichment. Tools: `get_pending_analyses {limit?}`,
 cited_entries?}`. `submit_analysis` goes through `applyAiVerdict`, which runs
 the guardrails in `analysis/verdict.ts` before any write (a rejected verdict
 leaves the request pending): non-blank summary/reasoning, `attention` needs
-`recommended_action`, a recheck needs `why_now`, and a `close` with no cited
-entry is rejected when unblocked IPS alerts exist since the last decision or
-when the sink can't be checked (fails closed). Phase A has no playbook, so
-`PHASE_A_ACTIVE_ENTRY_IDS` is empty and any cited id is rejected. It also
-throws on an already-answered, cancelled or nonexistent request.
+`recommended_action`, a recheck needs `why_now`, every `cited_entries` id must
+be an active playbook entry (`activeEntryIds`), and a `close` made while
+unblocked IPS alerts exist since the last decision, or while the sink can't be
+checked (fails closed), must cite at least one operator-backed entry
+(`operatorBackedEntryIds`, below). It also throws on an already-answered,
+cancelled or nonexistent request.
 
 `analysis_requests.source` (`'ai' | 'rule'`) distinguishes a Claude Code
 verdict from one the rule engine wrote directly (`closeByRule`); rule rows are
 inserted already `answered`, never pass through `pending`, and the dashboard
 shows which produced a decision.
+
+### Playbook (site knowledge)
+
+Operator-approved entries about this network, learned through proposals.
+
+- **One writer, every change a proposal.** `db/playbookStore.ts` is the only code
+  that writes `playbook_entries` and `playbook_proposals`. An entry's text and
+  status change only when a proposal is accepted (`add`, `edit`, `retire`;
+  nothing is deleted, and an edit reactivates a retired entry). `humanChange` records a dashboard change
+  as a proposal and accepts it at once, so the proposal table is the change log.
+  MCP can only create pending `ai` proposals; accepting and rejecting happen only
+  over REST (`api/playbook.ts`), where every write requires a JSON body so a
+  cross-site request can't make one.
+- **Operator-backed** (`operatorBackedEntryIds`): active entries whose latest
+  accepted proposal isn't `proposed_by: 'default'`. This follows the proposer, so
+  a default update accepted with edited text stays default. Shipped default text
+  can't by itself justify closing unblocked traffic; the playbook marks it
+  ` (default)`. The API's `is_default` is the negation, so it is also true for
+  every retired entry: only label active ones. The check covers who stands behind
+  a cited entry, not whether it applies.
+- **Seeding** (`mcp/playbook/defaults.ts`, `seed.ts`, run at startup): a
+  never-seen `key` becomes an active entry; a higher `version` becomes a pending
+  `edit` proposal, superseding an undecided `default` one for that entry, even if
+  the entry is retired; a default removed from code leaves its entry alone.
+  `playbook_defaults_seen` (written by `seed.ts`) tracks the handled version.
+  `key` is stable forever; raise `version` when changing the text.
+- **Learning loop:** `get_feedback` returns unreviewed
+  `human_closed_handled` / `human_closed_not_concern` / `human_reopened` history
+  rows, a reopen carrying `reopened_from` (the close it undid, whose summary
+  names a rule); `mark_feedback_considered` sets `feedback_considered_at`. The
+  run procedure in `core.ts` drives both.
+- **Import prompt:** `import_knowledge` has a session split its own notes into a
+  `homelab-services.json` fragment (mechanical host/port facts), `ai` proposals
+  (judgment calls) and a stale list. It writes no files.
+- **Site data never goes in the repo.** Entries live in `lens.db`; `core.ts` and
+  `defaults.ts` are public and stay generic (tests reject non-RFC 5737 IPv4
+  literals; GitHub's published SSH range is the one exemption, in the defaults).
 
 ### Rule-based auto-triage (`analysis/ruleTriage.ts`, `matchRules.ts`, `runner.ts`)
 

@@ -110,7 +110,8 @@ attention) back, which then shows up next to the finding. See
 
 | Surface | What it gives you |
 |---|---|
-| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip (with a button that copies the `/mcp__unifi-siem-lens__triage` command), events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). |
+| Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip (with a button that copies the `/mcp__unifi-siem-lens__triage` command), events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). A verdict that cited playbook entries shows them as **Relied on**, linked to the Playbook page. The header's **Playbook** link shows how many proposals are pending. |
+| Playbook (`/playbook`) | The site knowledge triage relies on: pending proposals, entries, the change log and your homelab registry (see [Playbook](#playbook)). |
 | Admin (`/admin`) | One-off maintenance actions — currently just the rule-triage backfill (see below). |
 | `GET /health` | Liveness + sink DB / schema-contract status. |
 | `GET /api/findings` | List findings. `view=open\|attention\|triaging\|closed\|all` (default `open`), optional `closed_by`, `q`, and `limit`/`offset` (paginated as `{ items, total }`). Each item carries its latest answered analysis and the note of its latest reopen (`latest_reopen_note`). |
@@ -123,11 +124,25 @@ attention) back, which then shows up next to the finding. See
 | `GET /api/analysis-requests` | Pending requests, or all of a finding's with `?findingId=`. |
 | `GET /api/queue` | AI queue stats for the queue strip. |
 | `POST /api/admin/backfill-rule-triage` | Re-checks every never-decided `triaging` finding against the auto-triage rules; returns `{ checked, closed, byRule }`. |
+| `GET /api/playbook` | `{ entries, registry }`: active entries first, then retired, plus the homelab registry. `is_default` marks an active entry that is still shipped default text. |
+| `GET /api/playbook/proposals` | Proposals, newest first (`status=pending\|accepted\|rejected`, optional), each with the findings cited as evidence and the entry it would change. |
+| `POST /api/playbook/proposals` | Add an entry yourself: `{ title, body }`. |
+| `POST /api/playbook/proposals/:id/accept` | Apply a pending proposal, optionally with your own text: `{ edited_title?, edited_body? }`. |
+| `POST /api/playbook/proposals/:id/reject` | Reject a pending proposal: `{ note? }`. |
+| `PUT /api/playbook/entries/:id` | Edit an entry (reactivates a retired one): `{ title, body }`. |
+| `POST /api/playbook/entries/:id/retire` | Retire an entry: `{ note? }`. |
 | `triage` (MCP prompt) | The triage playbook plus run procedure. In Claude Code: `/mcp__unifi-siem-lens__triage`. |
 | `get_playbook` (MCP) | The same playbook as a tool result, for clients that can't use MCP prompts. |
+| `import_knowledge` (MCP prompt) | Moves triage knowledge from a session's notes into proposals and a registry fragment. In Claude Code: `/mcp__unifi-siem-lens__import_knowledge`. |
 | `get_pending_analyses` (MCP) | List queued analysis requests, highest severity first (`limit?`). |
 | `get_analysis_context` (MCP) | Full context for one request, built when you fetch it: the finding, its history, prior analyses, recent events, activity since the last decision, and (for rechecks) before/after activity summaries. |
-| `submit_analysis` (MCP) | Post a verdict (`close` or `attention`) with risk level, summary and reasoning; see [Verdict guardrails](#verdict-guardrails). |
+| `submit_analysis` (MCP) | Post a verdict (`close` or `attention`) with risk level, summary, reasoning and the ids of any playbook entries it relies on (`cited_entries`); see [Verdict guardrails](#verdict-guardrails). |
+| `get_feedback` (MCP) | Your Handled / Not a concern / This was wrong decisions that no run has reviewed yet, oldest first (`limit?`, 1–100, default 50). A reopen also says what it undid. |
+| `mark_feedback_considered` (MCP) | Mark those rows reviewed: `{ ids }`. |
+| `propose_playbook_change` (MCP) | Propose adding, editing or retiring an entry: `op`, `entry_id?`, `title`, `body`, `rationale`, `evidence`. It stays pending until you decide. |
+| `list_playbook_proposals` (MCP) | List proposals (`status?`), so a run doesn't repeat a pending or rejected one. |
+
+The playbook `POST` and `PUT` endpoints require a JSON body, even `{}`.
 
 ## Running triage
 
@@ -138,8 +153,10 @@ actions to recommend, and guardrails the playbook can't be talked out of. It
 also lists your `TRUSTED_ADMIN_NAMES`, added at request time, so Claude
 applies the same trusted-admin rule the rules do. The
 playbook's core is code-owned (`server/src/mcp/playbook/`), so it is public and
-generic; site-specific knowledge arrives in a later release. The MCP server's
-`instructions` point any client at it.
+generic. What is specific to your network is added from the entries you have
+approved (see [Playbook](#playbook)). The MCP server's `instructions` point any
+client at it. Each run ends by reviewing your recent decisions and proposing
+changes to those entries, even when the queue is empty.
 
 **Interactively:** run `/mcp__unifi-siem-lens__triage` in a Claude Code
 session that has the lens configured. The dashboard's queue strip has a button
@@ -158,11 +175,94 @@ whatever `command -v claude` prints in your shell; `$HOME/.local/bin/claude`
 is the native installer's default.
 
 `--allowedTools "mcp__unifi-siem-lens"` pre-approves every tool on the lens's
-MCP server and nothing else. Add `mcp__unifi__list_clients` if you also run
+MCP server and nothing else. That includes proposing playbook changes, which
+still wait for your approval. Add `mcp__unifi__list_clients` if you also run
 `unifi-mcp-server` and want findings enriched with client names. `claude -p`
 picks up the MCP server from your Claude Code config (or pass `--mcp-config`).
 It expands the prompt's slash command the same way an interactive session does.
 This was checked with Claude Code 2.1.332.
+
+## Playbook
+
+The second layer of the triage playbook is **site knowledge**: short, specific
+entries about your network, such as which host runs a VPN client or which
+blocked scans are expected. They live in `lens.db`, never in this repo. Active
+entries are served to Claude with their ids, read fresh each time, so a change
+you approve applies from the next run. A verdict that relies on an entry cites
+it, and the card shows it under **Relied on**. Name the exact hosts, ports,
+signatures or CIDRs: the playbook tells Claude to apply an entry only to what it
+names.
+
+### The Playbook page
+
+`/playbook` has four parts:
+
+- **Pending proposals:** who proposed each one (Claude, or a shipped default
+  update), why, and the findings behind it with their history. An edit shows the
+  current and proposed text side by side; a retire shows the text being retired.
+  **Accept**, **Edit & accept** (not for a retire) or **Reject** with an optional
+  note.
+- **Active entries:** **Add entry**, **Edit** or **Retire**. Retired entries sit
+  in a collapsed group; editing one reactivates it.
+- **Change log:** every accepted and rejected proposal.
+- **Homelab registry:** your
+  [homelab services file](#homelablocal-service-enrichment), read-only.
+
+Every change to an entry is recorded as a proposal: your own adds, edits and
+retirements are saved as proposals accepted on the spot, so the change log is
+complete. No MCP tool can apply a change. Applying one goes through the
+dashboard's REST API, which has no authentication, so anyone or anything that
+can reach the dashboard can approve proposals (see `HOST` under
+[Environment Variables](#environment-variables)).
+
+### Default entries
+
+Lens ships five generic entries and adds them at startup:
+
+- blocked inbound scanner fingerprints;
+- Git over SSH to GitHub flagged as an outbound SSH scan;
+- generic exploit signatures on a VPN client (closes nothing until another entry
+  names the host);
+- device-status events;
+- repeated exploit attempts against a port-forwarded service.
+
+They are yours to edit or retire, and an upgrade never overwrites them. When a
+release changes a default's text, it arrives as a pending edit proposal against
+your current text, replacing any older update you haven't decided. That includes
+a default you retired; accepting the proposal brings it back.
+
+A default you haven't edited is marked **default**, and can't on its own justify
+closing traffic that wasn't blocked (see
+[Verdict guardrails](#verdict-guardrails)).
+
+### The learning loop
+
+Your decisions on findings are the input:
+
+- **Handled:** confirms the finding needed action; your note says what you did.
+- **Not a concern:** a false alarm; the playbook may be missing something.
+- **This was wrong:** a close you reopened, with the reason.
+
+At the end of each triage run Claude reads the decisions it hasn't reviewed,
+proposes new entries, edits or retirements where one is warranted, and marks
+those decisions reviewed. Nothing changes until you accept a proposal. Rules run
+before the AI, so no entry can undo a wrong rule close: if reopening one leads to
+a proposal, it should say which rule to consider narrowing in code.
+
+### Importing existing knowledge
+
+If you already keep triage knowledge in Claude's memory or your own notes, run
+`/mcp__unifi-siem-lens__import_knowledge` in a Claude Code session that has them
+and has the lens configured. It checks the current playbook and proposals first,
+then sorts what it knows into three groups:
+
+- **Host and port facts that are always benign:** printed as a
+  `homelab-services.json` fragment. Check it, merge it into your file
+  (`HOMELAB_SERVICES_PATH`) and restart lens.
+- **Judgment calls:** one proposal each, for you to approve on the Playbook page.
+- **Stale or unverifiable notes:** listed for you, not proposed.
+
+The prompt tells Claude not to write any file itself.
 
 ## Finding lifecycle
 
@@ -193,10 +293,18 @@ Findings from before this model are migrated by lens.db migration 4.
 - an `attention` verdict without `recommended_action` (what to do in the
   UniFi console);
 - a recheck without `why_now`;
-- a `close` with no cited playbook entry while unblocked IPS alerts exist
-  since the last decision, or when the sink can't be checked (fails closed).
-  The playbook arrives in a later phase, so for now any cited entry id is
-  rejected: a close is only accepted when every IPS alert was blocked.
+- a cited playbook entry id that doesn't exist or is retired;
+- a `close` while unblocked IPS alerts exist since the last decision, or when
+  the sink can't be checked (fails closed), unless it cites at least one entry
+  you stand behind.
+
+An entry you stand behind is an active one that you wrote or edited, or that
+came from a Claude proposal you accepted. Shipped default text alone doesn't
+count. Accepting a default's update proposal leaves it a default, even if you
+changed the text while accepting; saving the entry from the Playbook page makes
+it yours. The server checks who stands behind a cited entry, not whether it
+covers the traffic: applying entries literally is the playbook's rule. When
+every IPS alert was blocked, a `close` needs no citation.
 
 ## Client findings
 
@@ -260,8 +368,8 @@ or the operator re-queued are left alone.
 
 ## Homelab/local-service enrichment
 
-An IDS finding pointing at `192.168.1.26:8989` means nothing to a Claude
-Code session unless it also knows `192.168.1.26:8989` is your own Sonarr
+An IDS finding pointing at `192.0.2.10:8989` means nothing to a Claude
+Code session unless it also knows `192.0.2.10:8989` is your own Sonarr
 instance, not a mystery host. `HOMELAB_SERVICES_PATH` points lens at a
 local JSON file mapping LAN IPs to the services running on them (typically
 the containers on a homelab/NAS box), so that context is attached
@@ -282,9 +390,9 @@ image.
 
    ```json
    {
-     "192.168.1.26": {
-       "label": "tranquility (homelab)",
-       "notes": ["Plex remote access is in use on tranquility"],
+     "192.0.2.10": {
+       "label": "example homelab server",
+       "notes": ["Plex remote access is in use on this host"],
        "services": [
          { "port": 8989, "name": "sonarr", "description": "TV show PVR" },
          { "port": 8080, "name": "qbittorrent", "description": "torrent client WebUI" }
@@ -305,13 +413,17 @@ image.
 3. Restart lens. The file is loaded once at startup — like `SINK_DB_PATH`,
    a missing or malformed file is a silent no-op, never a startup failure.
 
-**What it affects:** only the context bundle built when a finding is
-fetched by a Claude Code session (`get_analysis_context`) — each recent event
-in that bundle gets a `homelab: { host, service }` field the analyzing
-session sees alongside the raw event. The bundle is built at fetch time, so
-an edited file is picked up on the next fetch without re-queuing. (The
-`homelab_service_egress` and `exposed_host_scan` auto-triage rules also read
-it.)
+**What it affects:** the context bundle built when a finding is fetched by a
+Claude Code session (`get_analysis_context`) — each recent event in that bundle
+gets a `homelab: { host, service }` field the analyzing session sees alongside
+the raw event. The `homelab_service_egress` and `exposed_host_scan` auto-triage
+rules read it too, and the [Playbook page](#the-playbook-page) shows it
+read-only, so anyone who can reach the dashboard can read it. Lens loads the
+file at startup; restart after editing it.
+
+Put facts a rule can match mechanically (this host and port are benign, this
+host is exposed to the WAN) here, and judgment calls in the
+[playbook](#playbook).
 
 `server/homelab-services.example.json` (checked in) documents the shape
 with placeholder values; `server/data/homelab-services.json` (gitignored,
@@ -341,14 +453,14 @@ invoke it directly as `/server:analyzing-findings`.
 | `SINK_DB_PATH` | yes | — | Path to `unifi-siem-sink`'s `events.db`, opened read-only |
 | `MCP_SECRET` | yes | — | Bearer token clients must send as `Authorization: Bearer <MCP_SECRET>` to call `/mcp` |
 | `PORT` | no | `3002` | Port the dashboard/API/MCP server listens on |
-| `HOST` | no | `127.0.0.1` | Bind address. Defaults to localhost-only — the dashboard/REST API have no authentication of their own (only `/mcp` does, via `MCP_SECRET`), so widen this deliberately (e.g. to your LAN interface IP, or `0.0.0.0`) only if you want the dashboard reachable from other devices |
-| `LENS_DB_PATH` | no | `./data/lens.db` (`/lens-data/lens.db` in Docker) | Lens's own SQLite store — findings, baselines, seen-entity tracking, analysis-request queue |
+| `HOST` | no | `127.0.0.1` | Bind address. Defaults to localhost-only — the dashboard/REST API (including playbook approvals) have no authentication of their own (only `/mcp` does, via `MCP_SECRET`), so widen this deliberately (e.g. to your LAN interface IP, or `0.0.0.0`) only if you want the dashboard reachable from other devices |
+| `LENS_DB_PATH` | no | `./data/lens.db` (`/lens-data/lens.db` in Docker) | Lens's own SQLite store — findings, baselines, seen-entity tracking, analysis-request queue, playbook entries and proposals |
 | `LAN_CIDRS` | no | *(none)* | Comma-separated CIDRs treated as internal/LAN for the internal-source heuristic, e.g. `10.0.0.0/8,192.168.0.0/16` |
 | `TRUSTED_ADMIN_NAMES` | no | *(none)* | Comma-separated admin display names (as they appear in UniFi's own audit log, e.g. `Ian C.`) that auto-dismiss `new_source_ip` findings which are entirely explained by that admin logging into the UniFi console. Empty by default — this rule never fires until configured |
 | `SAFE_SIGNATURE_PREFIXES` | no | `ET DROP,ET CINS,ET TOR,ET COMPROMISED,ET DSHIELD` | Comma-separated IDS/IPS signature prefixes (Emerging Threats' reputation/blocklist rule-family naming convention) that auto-dismiss a finding when every backing event is a blocked hit from one of these signature families. Prefixes are matched via SQL `LIKE` (case-insensitive; a configured prefix containing `%` or `_` acts as a wildcard) — keep entries specific |
 | `UNIFI_MCP_SERVER_URL` | no | *(unset)* | Optional `unifi-mcp-server` MCP endpoint, e.g. `http://localhost:3000/mcp`. When set, lens resolves source IPs to known client names and pulls a firewall-rule summary into analysis context. Left unset, this enrichment is skipped entirely — never required |
 | `UNIFI_MCP_SERVER_TOKEN` | no | *(unset)* | Bearer token sent as `Authorization: Bearer <token>` when calling `UNIFI_MCP_SERVER_URL`, for `unifi-mcp-server` instances that require auth. Ignored if `UNIFI_MCP_SERVER_URL` is unset |
-| `HOMELAB_SERVICES_PATH` | no | `./data/homelab-services.json` | Path to a local, never-committed JSON file mapping LAN host IPs to the services running on them (e.g. a homelab server's Docker containers — see `server/homelab-services.example.json` for the shape). Analysis context labels event destinations that match an entry (e.g. `192.168.1.26:8989` → `sonarr`) instead of leaving them as bare IP:port. Missing file is a no-op — this enrichment is entirely optional |
+| `HOMELAB_SERVICES_PATH` | no | `./data/homelab-services.json` | Path to a local, never-committed JSON file mapping LAN host IPs to the services running on them (e.g. a homelab server's Docker containers — see `server/homelab-services.example.json` for the shape). Analysis context labels event destinations that match an entry (e.g. `192.0.2.10:8989` → `sonarr`) instead of leaving them as bare IP:port. Missing file is a no-op — this enrichment is entirely optional |
 | `LOG_LEVEL` | no | `info` | `error` \| `warn` \| `info` \| `debug` |
 
 ---
