@@ -1,15 +1,24 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
-import { openLensDb } from '../../src/db/lensDb.js';
+import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
+import { humanChange, listEntries } from '../../src/db/playbookStore.js';
 import type { SinkDb } from '../../src/db/sinkDb.js';
 import { assemblePlaybook } from '../../src/mcp/playbook/assemble.js';
+import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
+import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
 import { createLensMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
 import { seededSinkDb } from '../helpers.js';
 
-async function connect({ sinkDb }: { sinkDb: SinkDb | null }) {
+async function connect({
+  sinkDb,
+  lensDb = openLensDb(':memory:'),
+}: {
+  sinkDb: SinkDb | null;
+  lensDb?: LensDb;
+}) {
   const server = createLensMcpServer({
-    lensDb: openLensDb(':memory:'),
+    lensDb,
     sinkDb,
     unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
@@ -35,7 +44,7 @@ describe('lens MCP server', () => {
     const res = await client.getPrompt({ name: 'triage' });
     expect(res.messages).toHaveLength(1);
     expect(res.messages[0].role).toBe('user');
-    expect((res.messages[0].content as { text: string }).text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'] }));
+    expect((res.messages[0].content as { text: string }).text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }));
   });
 
   it('get_playbook returns the same text', async () => {
@@ -43,7 +52,7 @@ describe('lens MCP server', () => {
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
-    expect(res.content[0].text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'] }));
+    expect(res.content[0].text).toBe(assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }));
   });
 
   it('serves the configured trusted admins in the playbook', async () => {
@@ -60,11 +69,50 @@ describe('lens MCP server', () => {
     expect((await client.getPrompt({ name: 'triage' })).messages).toHaveLength(1);
   });
 
+  async function playbookText(client: Client) {
+    const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    return res.content[0].text;
+  }
+
+  it('serves an entry accepted after the server was built', async () => {
+    const lensDb = openLensDb(':memory:');
+    const client = await connect({ sinkDb: seededSinkDb([]), lensDb });
+    expect(await playbookText(client)).not.toContain('### [');
+
+    const { entry } = humanChange(
+      lensDb,
+      { op: 'add', title: 'Late entry', body: 'late body' },
+      '2026-01-01T00:00:00.000Z'
+    );
+    expect(await playbookText(client)).toContain(`### [${entry.id}] Late entry\n\nlate body`);
+    const prompt = await client.getPrompt({ name: 'triage' });
+    expect((prompt.messages[0].content as { text: string }).text).toContain(`### [${entry.id}]`);
+
+    humanChange(lensDb, { op: 'retire', entry_id: entry.id }, '2026-01-02T00:00:00.000Z');
+    expect(await playbookText(client)).not.toContain('### [');
+  });
+
+  it('marks entries that are still shipped default text', async () => {
+    const lensDb = openLensDb(':memory:');
+    seedPlaybookDefaults(lensDb, PLAYBOOK_DEFAULTS.slice(0, 2), '2026-01-01T00:00:00.000Z');
+    const [first, second] = listEntries(lensDb);
+    humanChange(
+      lensDb,
+      { op: 'edit', entry_id: second.id, title: 'Mine', body: 'my text' },
+      '2026-01-02T00:00:00.000Z'
+    );
+    const text = await playbookText(await connect({ sinkDb: null, lensDb }));
+    expect(text).toContain(`### [${first.id}] ${first.title} (default)\n\n`);
+    expect(text).toContain(`### [${second.id}] Mine\n\n`);
+  });
+
   it('every lens tool the playbook names is registered', async () => {
     const client = await connect({ sinkDb: seededSinkDb([]) });
     const registered = new Set((await client.listTools()).tools.map((t) => t.name));
     const named = new Set(
-      [...assemblePlaybook({ trustedAdminNames: ['alice'] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
+      [...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
     );
     // list_clients belongs to the separate `unifi` MCP server, not the lens.
     named.delete('list_clients');

@@ -1,7 +1,10 @@
 import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { LensDb } from '../db/lensDb.js';
+import { listEntries, operatorBackedEntryIds } from '../db/playbookStore.js';
 import type { AnalysisDeps } from './context.js';
-import { assemblePlaybook, type PlaybookOptions } from './playbook/assemble.js';
+import { assemblePlaybook, type PlaybookOptions, type SiteEntry } from './playbook/assemble.js';
+import { registerPlaybookTools } from './playbookTools.js';
 import { registerAnalysisTools } from './tools.js';
 
 // src/mcp/server.ts and dist/mcp/server.js both sit two levels below server/.
@@ -13,13 +16,31 @@ export const SERVER_INSTRUCTIONS =
   '`get_playbook` tool where prompts are not available, and follow the playbook it returns: it ' +
   'covers the run procedure, how to choose close or attention, and the guardrails the server enforces.';
 
+function activeSiteEntries(db: LensDb): SiteEntry[] {
+  const backed = operatorBackedEntryIds(db);
+  return listEntries(db, { status: 'active' }).map(({ id, title, body }) => ({
+    id,
+    title,
+    body,
+    isDefault: !backed.has(id),
+  }));
+}
+
 // One server per /mcp request (stateless transport), built the same way in tests.
-export function createLensMcpServer(deps: AnalysisDeps, playbook: PlaybookOptions): McpServer {
+export function createLensMcpServer(
+  deps: AnalysisDeps,
+  settings: Omit<PlaybookOptions, 'entries'>
+): McpServer {
   const server = new McpServer(
     { name: 'unifi-siem-lens', version },
     { instructions: SERVER_INSTRUCTIONS }
   );
   registerAnalysisTools(server, deps);
+  registerPlaybookTools(server, deps.lensDb);
+
+  // Entries are read on each call, so an accepted proposal shows up at once.
+  const playbookText = () =>
+    assemblePlaybook({ ...settings, entries: activeSiteEntries(deps.lensDb) });
 
   server.registerPrompt(
     'triage',
@@ -31,7 +52,7 @@ export function createLensMcpServer(deps: AnalysisDeps, playbook: PlaybookOption
       messages: [
         {
           role: 'user' as const,
-          content: { type: 'text' as const, text: assemblePlaybook(playbook) },
+          content: { type: 'text' as const, text: playbookText() },
         },
       ],
     })
@@ -44,7 +65,7 @@ export function createLensMcpServer(deps: AnalysisDeps, playbook: PlaybookOption
       description:
         'The triage playbook: run procedure, verdict rules and guardrails. Same content as the `triage` prompt, for clients that cannot use MCP prompts. Call it first and follow it.',
     },
-    () => ({ content: [{ type: 'text' as const, text: assemblePlaybook(playbook) }] })
+    () => ({ content: [{ type: 'text' as const, text: playbookText() }] })
   );
 
   return server;

@@ -7,6 +7,7 @@ import {
   humanChange,
   listEntries,
   listProposals,
+  operatorBackedEntryIds,
   ProposalError,
   type ProposedBy,
   rejectProposal,
@@ -291,6 +292,62 @@ describe('playbookStore', () => {
     const created = createProposal(db, addInput(), T0);
     expect(created.evidence).toEqual({ finding_ids: [1, 2], history_ids: [3] });
     expect(listProposals(db)[0].evidence).toEqual({ finding_ids: [1, 2], history_ids: [3] });
+    db.close();
+  });
+});
+
+describe('operatorBackedEntryIds', () => {
+  // An entry as the seeder makes it: an accepted `default` add.
+  function defaultEntry(db: Db) {
+    const created = createProposal(db, addInput('default'), T0);
+    return acceptProposal(db, created.id, null, T0).entry;
+  }
+
+  const edit = (db: Db, entryId: number, proposed_by: ProposedBy, at: string) =>
+    createProposal(db, { ...addInput(proposed_by), op: 'edit', entry_id: entryId }, at);
+
+  it('includes entries added by the operator or an accepted ai proposal, not defaults', () => {
+    const db = openLensDb(':memory:');
+    const human = seedEntry(db);
+    const ai = acceptProposal(db, createProposal(db, addInput('ai'), T0).id, null, T1).entry;
+    defaultEntry(db);
+    expect(operatorBackedEntryIds(db)).toEqual(new Set([human.id, ai.id]));
+    db.close();
+  });
+
+  it('follows the latest accepted change to a default', () => {
+    const db = openLensDb(':memory:');
+    const { id } = defaultEntry(db);
+    const pending = edit(db, id, 'ai', T0);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(false);
+
+    acceptProposal(db, pending.id, null, T1);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+
+    acceptProposal(db, edit(db, id, 'default', T2).id, null, T2);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(false);
+    db.close();
+  });
+
+  it('orders by decision time, not creation order, and ignores rejected proposals', () => {
+    const db = openLensDb(':memory:');
+    const { id } = defaultEntry(db);
+    const early = edit(db, id, 'ai', T0);
+    const later = edit(db, id, 'default', T0);
+    acceptProposal(db, later.id, null, T1);
+    acceptProposal(db, early.id, null, T2);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+
+    rejectProposal(db, edit(db, id, 'default', T2).id, null, T2);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+    db.close();
+  });
+
+  it('excludes retired entries', () => {
+    const db = openLensDb(':memory:');
+    const { id } = seedEntry(db);
+    humanChange(db, { op: 'retire', entry_id: id }, T1);
+    expect(operatorBackedEntryIds(db)).toEqual(new Set());
     db.close();
   });
 });

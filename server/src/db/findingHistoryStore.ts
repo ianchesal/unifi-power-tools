@@ -29,6 +29,20 @@ export interface FindingHistoryRow {
   feedback_considered_at: string | null;
 }
 
+// The operator's own decisions: the signals playbook proposals are made from.
+const FEEDBACK_KINDS: HistoryKind[] = [
+  'human_closed_handled',
+  'human_closed_not_concern',
+  'human_reopened',
+];
+const FEEDBACK_KINDS_SQL = FEEDBACK_KINDS.map((k) => `'${k}'`).join(', ');
+
+export type FeedbackRow = FindingHistoryRow & {
+  entity_type: string;
+  entity_key: string;
+  status: string;
+};
+
 export function addHistory(
   db: LensDb,
   e: {
@@ -82,4 +96,30 @@ export function latestReopenNotes(db: LensDb, findingIds: number[]): Map<number,
     .all(...findingIds) as { finding_id: number; note: string | null }[];
   for (const r of rows) out.set(r.finding_id, r.note);
   return out;
+}
+
+// Operator decisions no triage run has reviewed yet, oldest first.
+export function pendingFeedback(db: LensDb, limit: number): FeedbackRow[] {
+  return db.conn
+    .prepare(
+      `SELECT h.*, f.entity_type, f.entity_key, f.status
+       FROM finding_history h JOIN findings f ON f.id = h.finding_id
+       WHERE h.kind IN (${FEEDBACK_KINDS_SQL}) AND h.feedback_considered_at IS NULL
+       ORDER BY h.at ASC, h.id ASC LIMIT ?`
+    )
+    .all(limit) as unknown as FeedbackRow[];
+}
+
+// Returns how many rows were newly marked; other ids are ignored.
+export function markFeedbackConsidered(db: LensDb, ids: number[], nowIso: string): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(', ');
+  const result = db.conn
+    .prepare(
+      `UPDATE finding_history SET feedback_considered_at = ?
+       WHERE id IN (${placeholders})
+         AND kind IN (${FEEDBACK_KINDS_SQL}) AND feedback_considered_at IS NULL`
+    )
+    .run(nowIso, ...ids);
+  return Number(result.changes);
 }

@@ -303,7 +303,7 @@ describe('pipeline', () => {
 });
 
 describe('applyAiVerdict', () => {
-  const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<number>() };
+  const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<number>(), operatorBackedEntryIds: new Set<number>() };
   const close = { verdict: 'close', risk_level: 'low', summary: 'benign scanner', reasoning: 'all blocked' } as const;
 
   it('applyAiVerdict close → closed by ai with summary as reason and an ai_closed history row', () => {

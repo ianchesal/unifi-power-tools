@@ -72,6 +72,23 @@ export function activeEntryIds(db: LensDb): Set<number> {
   return new Set(listEntries(db, { status: 'active' }).map((e) => e.id));
 }
 
+// Active entries whose current text is not a shipped default: the latest accepted
+// change to each came from the operator, or from an AI proposal they approved.
+// An add proposal has no entry_id, so the entry's source_proposal_id links it.
+export function operatorBackedEntryIds(db: LensDb): Set<number> {
+  const rows = db.conn
+    .prepare(
+      `SELECT e.id FROM playbook_entries e
+       WHERE e.status = 'active' AND (
+         SELECT p.proposed_by FROM playbook_proposals p
+         WHERE p.status = 'accepted' AND (p.entry_id = e.id OR p.id = e.source_proposal_id)
+         ORDER BY p.decided_at DESC, p.id DESC LIMIT 1
+       ) != 'default'`
+    )
+    .all() as { id: number }[];
+  return new Set(rows.map((r) => r.id));
+}
+
 // Marks an entry as the one seeded from a shipped default.
 export function setEntryDefaultKey(db: LensDb, entryId: number, key: string): void {
   db.conn.prepare('UPDATE playbook_entries SET default_key = ? WHERE id = ?').run(key, entryId);

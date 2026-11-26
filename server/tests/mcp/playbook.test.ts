@@ -63,19 +63,95 @@ describe('core playbook: review fixes', () => {
 
 describe('assemblePlaybook', () => {
   it('lists the configured trusted admins', () => {
-    const text = assemblePlaybook({ trustedAdminNames: ['alice', 'ops-bot'] });
+    const text = assemblePlaybook({ trustedAdminNames: ['alice', 'ops-bot'], entries: [] });
     expect(text).toMatch(/## Configured trusted admins[\s\S]*- alice\n- ops-bot/);
   });
   it('says when no trusted admins are configured', () => {
-    expect(assemblePlaybook({ trustedAdminNames: [] })).toMatch(
+    expect(assemblePlaybook({ trustedAdminNames: [], entries: [] })).toMatch(
       /## Configured trusted admins\n\nNone are configured/
     );
   });
   it('is the core, the trusted-admin section, then the empty site-knowledge section', () => {
-    const text = assemblePlaybook({ trustedAdminNames: [] });
+    const text = assemblePlaybook({ trustedAdminNames: [], entries: [] });
     expect(text.startsWith(`${CORE_PLAYBOOK}\n\n## Configured trusted admins`)).toBe(true);
     expect(text.endsWith(`\n\n${NO_SITE_ENTRIES_SECTION}`)).toBe(true);
     expect(NO_SITE_ENTRIES_SECTION.startsWith('## Site knowledge')).toBe(true);
     expect(NO_SITE_ENTRIES_SECTION).toMatch(/cited_entries/);
+  });
+});
+
+describe('core playbook: learning loop', () => {
+  const section = (from: string, to: string) =>
+    CORE_PLAYBOOK.slice(CORE_PLAYBOOK.indexOf(from), CORE_PLAYBOOK.indexOf(to));
+  const procedure = () => section('## Run procedure', '## The context bundle');
+  const improvements = () => CORE_PLAYBOOK.slice(CORE_PLAYBOOK.indexOf('## Suggesting improvements'));
+
+  it('run procedure ends with the feedback loop', () => {
+    expect(procedure()).toMatch(
+      /get_feedback[\s\S]*propose_playbook_change[\s\S]*mark_feedback_considered/
+    );
+    expect(procedure()).toContain('`list_playbook_proposals`');
+  });
+
+  it('still reviews feedback when the queue is empty', () => {
+    expect(procedure()).toMatch(/queue empty[\s\S]{0,120}step 5/);
+  });
+
+  it('asks for specific, evidenced proposals and keeps registry and rule candidates in the summary', () => {
+    expect(improvements()).toContain('`propose_playbook_change`');
+    expect(improvements()).toMatch(/finding_ids[\s\S]*history_ids/);
+    expect(improvements()).toMatch(/edit or retire/i);
+    expect(improvements()).toContain('closed this; consider narrowing it');
+    expect(improvements()).toMatch(/Registry candidates/);
+    expect(improvements()).toMatch(/Rule candidates/);
+    expect(improvements()).not.toMatch(/no tools for changing site knowledge/);
+  });
+
+  it('does not promise a rejection that an operator-written entry would pass', () => {
+    expect(CORE_PLAYBOOK).not.toContain('it would be rejected anyway');
+    expect(CORE_PLAYBOOK).toMatch(
+      /unblocked IPS alerts and no operator-written entry covers it, a \`close\` will be rejected/
+    );
+  });
+
+  it('says shipped defaults cannot justify closing unblocked traffic', () => {
+    expect(section('## Guardrails', '## Recommending UniFi actions')).toMatch(
+      /shipped defaults can't on their own justify closing traffic that wasn't blocked/
+    );
+  });
+});
+
+describe('assemblePlaybook: site entries', () => {
+  const entry = { id: 7, title: 'T', body: 'B', isDefault: false };
+
+  it('lists active entries with ids under Site knowledge', () => {
+    const text = assemblePlaybook({
+      trustedAdminNames: [],
+      entries: [entry, { id: 9, title: 'U', body: 'C', isDefault: false }],
+    });
+    expect(text).toContain('## Site knowledge');
+    expect(text).toContain('### [7] T\n\nB');
+    expect(text.endsWith('### [9] U\n\nC')).toBe(true);
+    expect(text).toMatch(/## Site knowledge\n\n[^\n]*cited_entries[^\n]*literally/);
+    expect(text).not.toContain(NO_SITE_ENTRIES_SECTION);
+    expect(text).toContain('## Configured trusted admins');
+  });
+
+  it('marks shipped default entries and says what they cannot do', () => {
+    const text = assemblePlaybook({
+      trustedAdminNames: [],
+      entries: [entry, { id: 8, title: 'D', body: 'E', isDefault: true }],
+    });
+    expect(text).toContain('### [8] D (default)\n\n');
+    expect(text).toContain('### [7] T\n\n');
+    expect(text.slice(text.lastIndexOf('## Site knowledge'))).toMatch(
+      /shipped defaults[^\n]*can't on their own justify closing traffic that wasn't blocked/
+    );
+  });
+
+  it('falls back to the placeholder with no entries', () => {
+    const text = assemblePlaybook({ trustedAdminNames: [], entries: [] });
+    expect(text.endsWith(NO_SITE_ENTRIES_SECTION)).toBe(true);
+    expect(text).not.toContain('### [');
   });
 });

@@ -8,7 +8,10 @@ import { queueForAnalysis } from '../../src/analysis/pipeline.js';
 import { getAnalysisRequest } from '../../src/db/analysisRequestsStore.js';
 import { getFindingById, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
+import { humanChange, listEntries } from '../../src/db/playbookStore.js';
 import type { SinkDb } from '../../src/db/sinkDb.js';
+import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
+import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
 import { registerAnalysisTools } from '../../src/mcp/tools.js';
 import { seededSinkDb } from '../helpers.js';
 
@@ -172,5 +175,75 @@ describe('MCP analysis tools', () => {
       arguments: { limit: 0 },
     })) as ToolResult;
     expect(bad.isError).toBe(true);
+  });
+});
+
+describe('submit_analysis citations', () => {
+  const T = '2026-01-01T00:00:00.000Z';
+
+  async function setup(action: string) {
+    const lensDb = openLensDb(':memory:');
+    const sinkDb = seededSinkDb([
+      { received_at: RECENT, category: 'ips_alert', signature: 'S', source_ip: IP, action },
+    ]);
+    const { finding, request } = queued(lensDb);
+    const client = await connectedClient(lensDb, sinkDb);
+    const submit = (cited: number[]) =>
+      call(client, 'submit_analysis', { id: request.id, ...close, cited_entries: cited });
+    const status = () => getFindingById(lensDb, finding.id as number)?.status;
+    const requestStatus = () => getAnalysisRequest(lensDb, request.id)?.status;
+    return { lensDb, submit, status, requestStatus };
+  }
+
+  const operatorEntry = (lensDb: LensDb) =>
+    humanChange(lensDb, { op: 'add', title: 'Mine', body: 'my entry' }, T).entry;
+
+  function defaultEntry(lensDb: LensDb) {
+    seedPlaybookDefaults(lensDb, PLAYBOOK_DEFAULTS.slice(0, 1), T);
+    return listEntries(lensDb)[0];
+  }
+
+  it('a close citing an active entry is accepted despite unblocked alerts', async () => {
+    const { lensDb, submit, status } = await setup('allowed');
+    const res = await submit([operatorEntry(lensDb).id]);
+    expect(res.isError).toBe(false);
+    expect(status()).toBe('closed');
+  });
+
+  it('citing a retired entry is rejected and the request stays pending', async () => {
+    const { lensDb, submit, status, requestStatus } = await setup('allowed');
+    const { id } = operatorEntry(lensDb);
+    humanChange(lensDb, { op: 'retire', entry_id: id }, T);
+    const res = await submit([id]);
+    expect(res.isError).toBe(true);
+    expect(res.text).toMatch(/unknown or inactive/);
+    expect(requestStatus()).toBe('pending');
+    expect(status()).toBe('triaging');
+  });
+
+  it('a close citing only a shipped default is rejected when alerts are unblocked', async () => {
+    const { lensDb, submit, status, requestStatus } = await setup('allowed');
+    const res = await submit([defaultEntry(lensDb).id]);
+    expect(res.isError).toBe(true);
+    expect(res.text).toMatch(/shipped default can't by itself justify/);
+    expect(res.text).toMatch(/operator-written entry or choose attention/);
+    expect(requestStatus()).toBe('pending');
+    expect(status()).toBe('triaging');
+  });
+
+  it('a close citing an operator-edited default is accepted when alerts are unblocked', async () => {
+    const { lensDb, submit, status } = await setup('allowed');
+    const { id } = defaultEntry(lensDb);
+    humanChange(lensDb, { op: 'edit', entry_id: id, title: 'Mine', body: 'my text' }, T);
+    const res = await submit([id]);
+    expect(res.isError).toBe(false);
+    expect(status()).toBe('closed');
+  });
+
+  it('a close citing a default is accepted when everything was blocked', async () => {
+    const { lensDb, submit, status } = await setup('blocked');
+    const res = await submit([defaultEntry(lensDb).id]);
+    expect(res.isError).toBe(false);
+    expect(status()).toBe('closed');
   });
 });

@@ -2,21 +2,21 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { decisionWindowStart } from '../analysis/findings.js';
 import { applyAiVerdict } from '../analysis/pipeline.js';
-import { PHASE_A_ACTIVE_ENTRY_IDS } from '../analysis/verdict.js';
 import {
   getAnalysisRequest,
   getPendingAnalysisRequests,
   updateRequestContext,
 } from '../db/analysisRequestsStore.js';
 import { getFindingById } from '../db/findingsStore.js';
+import { activeEntryIds, operatorBackedEntryIds } from '../db/playbookStore.js';
 import { countUnblockedIpsAlerts } from '../db/sinkQueries.js';
 import { type AnalysisDeps, buildAnalysisContext } from './context.js';
 
-function toolResult(data: unknown) {
+export function toolResult(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-function toolError(err: unknown) {
+export function toolError(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
   return {
     content: [{ type: 'text' as const, text: `Error: ${message}` }],
@@ -63,7 +63,7 @@ export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): vo
 
   server.tool(
     'submit_analysis',
-    'Submit a verdict for a pending analysis request: close (benign) or attention (needs a human). Closing is rejected while unblocked IPS alerts exist since the last decision, unless a playbook entry is cited.',
+    "Submit a verdict for a pending analysis request: close (benign) or attention (needs a human). Closing is rejected while unblocked IPS alerts exist since the last decision (or the sink can't be checked), unless a cited playbook entry is operator-written or operator-approved.",
     {
       id: z.number().int(),
       verdict: z.enum(['close', 'attention']),
@@ -97,7 +97,11 @@ export function registerAnalysisTools(server: McpServer, deps: AnalysisDeps): vo
           lensDb,
           id,
           input,
-          { unblockedIpsAlertsSinceDecision: unblocked, activeEntryIds: PHASE_A_ACTIVE_ENTRY_IDS },
+          {
+            unblockedIpsAlertsSinceDecision: unblocked,
+            activeEntryIds: activeEntryIds(lensDb),
+            operatorBackedEntryIds: operatorBackedEntryIds(lensDb),
+          },
           new Date().toISOString()
         );
         // The stored context bundle is large; the session already has it.
