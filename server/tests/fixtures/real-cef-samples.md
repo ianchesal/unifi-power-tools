@@ -1,0 +1,199 @@
+# Real captured CEF samples
+
+Raw CEF lines captured from a live UDM Pro (Network app 10.6.101), pasted
+here as ground truth for parser fixtures. Paste new samples at the end with
+a short header noting the date, what triggered the event, and the log
+category shown in the UniFi Network UI. Copy the *exact* text shown when
+expanding a log entry, or the raw line from a syslog capture — don't
+paraphrase or reformat it.
+
+Each sample here should eventually get promoted into a test fixture in
+`tests/parser/*.test.ts` once it's been used to validate or correct the
+parser. Note in this file whether that's been done yet.
+
+---
+
+## 2026-08-29 — Security / Intrusion Prevention (IDS/IPS block)
+
+Trigger: a real inbound connection attempt from an IP on the DShield Block
+List, blocked automatically by Threat Management. Found via the Network
+app's Logs UI (Category = Security), for an event that occurred
+2026-08-28 21:29 local time — predates this project's syslog capture
+listener being enabled, so it was copied from the UI rather than captured
+live over the wire.
+
+Status: used to fix `src/parser/normalize.ts`'s category mapping (which
+assumed a `UNIFIsubCategory` key that doesn't exist for this event type),
+signature extraction (real rule name is in `UNIFIipsSignature`, not the
+standard CEF `cs1` key), and event-time extraction (real timestamp is in
+`UNIFIutcTime`, not the standard CEF `rt` key). See test fixture
+`IPS_BLOCK_CEF` in `tests/parser/normalize.test.ts`.
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.6.101|201|Threat Detected and Blocked|7|UNIFIcategory=Security UNIFIhost=UDM-Pro proto=TCP spt=53250 dpt=32400 act=blocked app=Other UNIFIrisk=medium UNIFIpolicyName=DShield Block List UNIFIpolicyType=IDS/IPS UNIFIdirection=incoming deviceOutboundInterface=Default UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=5.1.31 src=198.235.24.95 dst=192.168.1.26 UNIFIsrcRegion=US UNIFIdstZone=Internal UNIFItotalBytes=58 UNIFItotalPackets=1 UNIFIpacketsReceived=0 UNIFIpacketsSent=1 UNIFIbytesReceived=0 UNIFIbytesSent=58 UNIFIflowCount=1 UNIFIflowId=null UNIFIflowStartTime=Aug 28, 2026 at 9:29:29.569 PM UNIFIipsSessionId=825220889423931 UNIFIipsSignature=ET DROP Dshield Block Listed Source group 1 UNIFIipsSignatureId=2402000 UNIFIutcTime=2026-08-29T01:29:30.869Z msg=A network intrusion attempt from 198.235.24.95 to 192.168.1.26 has been detected and blocked.
+```
+
+## 2026-08-29 — System / Admin Made Config Changes (UniFi OS level)
+
+Trigger: enabling the Syslog Settings export itself (unifiOS/protect
+category toggles), captured live via the syslog listener at 09:28 local
+time. Note this comes from a *different* CEF-emitting subsystem than the
+Network-app Security event above: Vendor/Product/DeviceVersion here are
+`Ubiquiti|UniFi OS|5.1.31` rather than `Ubiquiti|UniFi Network|10.6.101` —
+UniFi OS-level events (admin/system settings changes) and UniFi
+Network-app-level events (Security, Monitoring, etc.) are emitted with
+different Product/DeviceVersion header fields, and OS-level events don't
+carry `UNIFIcategory`/`UNIFIsubCategory` at all — they identify the action
+via the CEF `Name` field and numeric signature ID instead (`1005` here).
+
+Status: not yet used to change the parser. Currently falls through to
+`category: 'unknown'` in `normalize.ts`, which is safe (raw is preserved)
+but not ideal — revisit if UniFi OS-level events turn out to matter for
+this project's use case (they're admin/system housekeeping, not security
+threats, so may not be worth dedicated categorization).
+
+```
+CEF:0|Ubiquiti|UniFi OS|5.1.31|1005|Admin Made Config Changes|2|UNIFIhost=Host UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDMPRO UNIFIdeviceIp=71.235.83.203 UNIFIdeviceMac=68:D7:9A:35:AF:41 UNIFIdeviceVersion=5.1.31 msg=Ian C. changed Syslog Settings Mode setting from "off" to "external". Source IP: 71.235.83.203
+```
+
+## 2026-08-26 - Security / Threat Detected and Blocked
+
+Trigger: Unknown. It's reported as Very High for Severity Level and its from
+tranquility to tranquility which is my home lab machine. Just an oddity I
+thought worth capturing.
+
+Status: Unknown
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.5.67|201|Threat Detected and Blocked|9|UNIFIcategory=Security UNIFIhost=UDM-Pro UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=5.1.31 UNIFIsrcClientAlias=tranquility UNIFIsrcClientHostname=tranquility UNIFIsrcClientMac=1c:1b:0d:18:07:53 UNIFIsrcClientModel=Dell T110 Server UNIFIdstClientAlias=tranquility UNIFIdstClientHostname=tranquility UNIFIdstClientMac=1c:1b:0d:18:07:53 UNIFIdstClientModel=Dell T110 Server UNIFIutcTime=2026-08-27T00:02:03.992Z msg=A network intrusion attempt from tranquility to tranquility has been detected and blocked.
+```
+
+Note: this event has `UNIFIcategory=Security` but no `UNIFIsubCategory` and no
+`UNIFIpolicyType` at all, unlike the DShield sample above — so it currently
+falls through to the generic `category: 'security'` fallback slug rather
+than `ips_alert`. It has no `src`/`dst`/`UNIFIclientIp` keys, only
+alias/hostname/MAC pairs for both sides. It *does* carry
+`UNIFIdeviceIp=192.168.1.1` (the gateway), and before the 2026-11-25 fix that
+was wrongly stored as `source_ip`. Security events no longer fall back to
+`UNIFIdeviceIp`, so `source_ip`/`dest_ip` are `null` and the client lands in
+`source_client_name`/`source_client_mac` (the identical dst client is dropped).
+
+Status: used to add the UNIFIcategory-slug fallback for unmapped category
+pairs (see `CATEGORY_MAP` fallback logic in `normalize.ts`), and as a test case
+for the gateway-misattribution fix (`tests/parser/index.test.ts`).
+
+## 2026-11-25 — Security / IDS/IPS, both ends labeled the same client (event 7557)
+
+Trigger: VenomRAT C2 keepalive blocked on UDM OS 6.0.17 / Network 11.0.104.
+No `src=`/`dst=`; UniFi labels both ends as tranquility even though
+`deviceOutboundInterface=Comcast` shows the flow left via the WAN. The remote
+peer's IP is not in the message. Related rows 7475 and 7556 have the same shape
+(7556's `spt=2271` is the NanoCore C2 port, so even the src label is likely
+backwards).
+
+Status: used for the gateway-misattribution fix: `source_ip`/`dest_ip` null,
+`source_client_name=tranquility`, dst client dropped
+(`tests/fixtures/realSamples.ts`, `tests/parser/index.test.ts`).
+
+```
+Nov 25 10:16:13 UDM-Pro CEF:0|Ubiquiti|UniFi Network|11.0.104|201|Threat Detected and Blocked|9|UNIFIcategory=Security UNIFIhost=UDM-Pro proto=TCP spt=50330 dpt=52128 act=blocked app=Other UNIFIrisk=high UNIFIpolicyName=Malware and Trojans UNIFIpolicyType=IDS/IPS UNIFIdirection=outgoing deviceInboundInterface=Default deviceOutboundInterface=Comcast UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=6.0.17 UNIFIsrcClientAlias=tranquility UNIFIsrcClientHostname=tranquility UNIFIsrcClientMac=1c:1b:0d:18:07:53 UNIFIsrcClientModel=Dell T110 Server UNIFIsrcZone=Internal UNIFIsrcRegion=US UNIFIdstClientAlias=tranquility UNIFIdstClientHostname=tranquility UNIFIdstClientMac=1c:1b:0d:18:07:53 UNIFIdstClientModel=Dell T110 Server UNIFIdstZone=Internal UNIFItotalBytes=563812 UNIFItotalPackets=2059 UNIFIpacketsReceived=1031 UNIFIpacketsSent=1028 UNIFIbytesReceived=495910 UNIFIbytesSent=67902 UNIFIflowCount=1 UNIFIflowId=null UNIFIflowStartTime=Nov 25, 2026 at 10:14:30.088 AM UNIFIipsSessionId=1788266902205713 UNIFIipsSignature=ET MALWARE VenomRAT CnC Server Keepalive UNIFIipsSignatureId=2055754 UNIFIutcTime=2026-11-25T15:16:13.724Z msg=A network intrusion attempt from tranquility to tranquility has been detected and blocked.
+```
+
+## 2026-11-24 — Security / IDS/IPS, dst IP but no src (event 7521)
+
+Trigger: outbound SSH scan signature from a laptop to GitHub. Has `dst=` but
+no `src=`; the internal host is identified only by `UNIFIsrcClient*`. The very
+next alert (7522) for the same flow carried `src=192.168.1.191` and no client
+fields — UniFi sends one or the other, never both.
+
+Status: used for the gateway-misattribution fix: `source_ip` null,
+`dest_ip=140.82.112.3`, `source_client_mac=d0:c1:b5:24:8e:54`.
+
+```
+Nov 24 17:36:55 UDM-Pro CEF:0|Ubiquiti|UniFi Network|11.0.104|201|Threat Detected and Blocked|7|UNIFIcategory=Security UNIFIhost=UDM-Pro proto=TCP spt=49318 dpt=22 act=blocked app=SSH UNIFIrisk=medium UNIFIpolicyName=Scanning Activity UNIFIpolicyType=IDS/IPS UNIFIdirection=outgoing deviceInboundInterface=Default deviceOutboundInterface=Comcast UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=6.0.17 dst=140.82.112.3 UNIFIsrcClientAlias=ian-chesal-ML-MHWDP7TWPR 8e:54 UNIFIsrcClientHostname=ian-chesal-ML-MHWDP7TWPR UNIFIsrcClientMac=d0:c1:b5:24:8e:54 UNIFIsrcClientModel=Apple Laptop UNIFIsrcZone=Internal UNIFIdstRegion=US UNIFIdstZone=External UNIFItotalBytes=78 UNIFItotalPackets=1 UNIFIpacketsReceived=0 UNIFIpacketsSent=1 UNIFIbytesReceived=0 UNIFIbytesSent=78 UNIFIflowCount=1 UNIFIflowId=null UNIFIflowStartTime=Nov 24, 2026 at 5:36:53.782 PM UNIFIipsSessionId=1670049679963791 UNIFIipsSignature=ET SCAN Potential SSH Scan OUTBOUND UNIFIipsSignatureId=2003068 UNIFIutcTime=2026-11-24T22:36:55.204Z msg=A network intrusion attempt from ian-chesal-ML-MHWDP7TWPR 8e:54 to 140.82.112.3 has been detected and blocked.
+```
+
+## 2026-08-29 — Internet and WAN / Internet Down
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.5.67|100|Internet Down|10|UNIFIcategory=Internet and WAN UNIFIhost=UDM-Pro UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=5.1.31 UNIFIwanName=Comcast UNIFIwanId=WAN1 UNIFIwanPort=9 UNIFIwanIsp=Comcast Cable UNIFIwanSubnet=71.235.83.203/21 UNIFIwanSla=Auto UNIFIutcTime=2026-08-25T07:22:44.467Z msg=Internet connection WAN1 (Comcast Cable) on port 9 is down.
+```
+
+## 2026-08-29 — Internet and WAN / High Latency Detected
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.6.101|112|High Latency Detected|4|UNIFIcategory=Internet and WAN UNIFIhost=UDM-Pro UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=5.1.31 UNIFIwanName=Comcast UNIFIwanId=WAN1 UNIFIwanPort=9 UNIFIwanIsp=Comcast Cable UNIFIwanSubnet=71.235.83.203/21 UNIFIwanSla=Auto UNIFIwanLatency=62 UNIFIutcTime=2026-08-29T01:18:57.217Z msg=Internet connection WAN1 (Comcast Cable) on port 9 is experiencing high latency.
+```
+
+## 2026-08-29 — Software Updates / Network Updated
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.6.101|578|Network Updated|4|UNIFIcategory=Software Updates UNIFIhost=UDM-Pro UNIFIapplication=UniFi Network UNIFIapplicationVersion=10.6.101 UNIFIapplicationPriorVersion=10.5.67 UNIFIutcTime=2026-08-28T02:28:59.064Z msg=UniFi Network has updated to 10.6.101
+```
+
+## 2026-08-29 — UniFi Devices / Device Offline
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.5.67|512|Device Offline|8|UNIFIcategory=UniFi Devices UNIFIhost=UDM-Pro UNIFIdeviceMac=d0:21:f9:bc:15:fc UNIFIdeviceName=U6-Lite Liams Room UNIFIdeviceModel=U6-Lite UNIFIdeviceIp=192.168.1.66 UNIFIdeviceVersion=6.7.54 UNIFIconnectedToDeviceName=UDM-Pro UNIFIconnectedToDevicePort=1 UNIFIconnectedToDeviceIp=192.168.1.1 UNIFIconnectedToDeviceMac=68:d7:9a:35:af:41 UNIFIconnectedToDeviceModel=UDM-Pro UNIFIconnectedToDeviceVersion=5.1.26 UNIFIreference=https://help.ui.com/hc/en-us/articles/7258465146519 UNIFIutcTime=2026-08-23T20:28:58.384Z msg=U6-Lite Liams Room went offline.
+```
+
+## 2026-08-29 — UniFi Devices / AP Channel Change
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.5.67|530|AP Channel Change|2|UNIFIcategory=UniFi Devices UNIFIhost=UDM-Pro UNIFIdeviceMac=24:5a:4c:58:91:f4 UNIFIdeviceName=UAP-IW Basement Theater UNIFIdeviceModel=UAP-IW-HD UNIFIdeviceIp=192.168.1.162 UNIFIdeviceVersion=6.7.54 UNIFIcurrentChannel=112 UNIFIpriorChannel=40 UNIFIutcTime=2026-08-20T06:01:15.074Z msg=UAP-IW Basement Theater moved to channel 112 from 40.
+```
+
+## 2026-08-29 — Internet and WAN / Packet Loss Detected
+
+```
+CEF:0|Ubiquiti|UniFi Network|10.5.67|113|Packet Loss Detected|4|UNIFIcategory=Internet and WAN UNIFIhost=UDM-Pro UNIFIdeviceMac=68:d7:9a:35:af:41 UNIFIdeviceName=UDM-Pro UNIFIdeviceModel=UDM-Pro UNIFIdeviceIp=192.168.1.1 UNIFIdeviceVersion=5.1.31 UNIFIwanName=Comcast UNIFIwanId=WAN1 UNIFIwanIsp=Comcast Cable UNIFIwanSubnet=71.235.83.203/21 UNIFIwanSla=Auto UNIFIutcTime=2026-08-25T07:20:58.294Z msg=Internet connection WAN1 (Comcast Cable) on port 9 is experiencing packet loss.
+```
+
+Status (all six above): used to add the UNIFIcategory-slug fallback —
+these all map to `internet_and_wan`, `software_updates`, or
+`unifi_devices` via that fallback rather than a hand-written entry in
+`CATEGORY_MAP`, since none of them are Security-category events and this
+project's hand-mapped short names are reserved for the security taxonomy
+(`ips_alert`, `firewall_block`, `honeypot`, `admin_action`).
+
+## 2026-08-29 — UniFi Protect / motion (detection)
+
+Trigger: a camera ("Front Door") recorded motion. Captured live over the
+syslog listener at 09:50 local time. First sample from a third distinct
+CEF-emitting product: `Ubiquiti|UniFi Protect|7.2.105`, alongside the
+previously-seen `Ubiquiti|UniFi OS|5.1.31` and
+`Ubiquiti|UniFi Network|10.x.x` sources. Envelope here is plain
+RFC3164-style (`Mon DD HH:MM:SS hostname CEF:...`), no secondary ISO8601
+timestamp like the UniFi OS/Network samples carry.
+
+Notable shape differences from the Network/OS samples above:
+- `UNIFIcategory=detection` is a category value we hadn't seen before —
+  falls through to the `detection` slug via the fallback added for the
+  Internet/WAN and UniFi Devices samples.
+- Carries lowercase duplicate extension keys (`category=detection`,
+  `severity=3`) that echo the CEF header `Severity` field and the
+  `UNIFIcategory` key — harmless, since the parser reads the CEF header
+  Severity and `UNIFIcategory` specifically, not these lowercase
+  duplicates, but worth knowing Protect echoes some fields redundantly.
+- `msg` value is `"Front Door has recorded motion."` — with literal
+  double-quote characters *inside* the value, since CEF doesn't
+  quote-wrap string values itself. The parser stores the quotes as part
+  of the string (correct — not something to strip).
+- No `eventId`, `eventType`, `timestamp` (epoch millis) equivalents exist
+  in the Network/OS samples above — this looks like Protect's own event
+  schema layered under CEF's Extension format rather than reusing the
+  `UNIFI*`-prefixed key convention Network/OS events use.
+
+Status: not yet used to change the parser — `category: 'detection'`,
+`event_time: null` (no `rt`/`UNIFIutcTime` key; `timestamp` is epoch
+millis under a plain, non-`UNIFI`-prefixed key our normalizer doesn't
+read yet), and `signature: null` (no `UNIFIipsSignature`/`UNIFIpolicyName`
+present) are all currently correct-but-incomplete for this event type.
+Revisit if UniFi Protect events turn out to matter for this project's
+scope (they're camera/detection data, not network security — may not be
+worth dedicated handling, similar to the UniFi OS admin-action sample
+above).
+
+```
+CEF:0|Ubiquiti|UniFi Protect|7.2.105|2159|motion|3|UNIFIcategory=detection eventId=4ebd78c0-8f52-4e1a-8b66-84a6f5d487a2 eventType=motion category=detection severity=3 timestamp=1788011392204 msg="Front Door has recorded motion."
+```
