@@ -755,6 +755,19 @@ footer {
   padding: 8px 12px;
 }
 
+.queue-strip-head {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.queue-strip-copy {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
 .queue-strip-toggle {
   background: none;
   border: 0;
