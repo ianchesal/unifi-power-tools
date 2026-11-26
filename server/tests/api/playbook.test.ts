@@ -110,9 +110,14 @@ describe('GET /api/playbook/proposals', () => {
       evidence_findings: [
         { id: f.id, entity_type: 'source_ip', entity_key: '198.51.100.1', status: 'attention' },
       ],
+      missing_evidence_count: 1,
       current: { title: 'Seed', body: 'Seed body', status: 'active' },
     });
-    expect(byId.get(add.id)).toMatchObject({ evidence_findings: [], current: null });
+    expect(byId.get(add.id)).toMatchObject({
+      evidence_findings: [],
+      missing_evidence_count: 0,
+      current: null,
+    });
     expect(byId.get(retire.id)).toMatchObject({
       current: { title: 'Seed', body: 'Seed body', status: 'active' },
     });
@@ -337,5 +342,15 @@ describe('playbook API errors', () => {
     }
     expect(listProposals(db, { status: 'pending' }).map((r) => r.id)).toEqual([p.id]);
     expect(listEntries(db)).toEqual([entry]);
+  });
+});
+
+describe('minor fixes', () => {
+  it('rejects a misspelled accept field instead of applying the unedited text', async () => {
+    const { db, api } = setup();
+    const p = pendingProposal(db);
+    const res = await api.post(`/api/playbook/proposals/${p.id}/accept`).send({ edited_boby: 'x' });
+    expect(res.status).toBe(400);
+    expect(listProposals(db, { status: 'pending' })).toHaveLength(1);
   });
 });

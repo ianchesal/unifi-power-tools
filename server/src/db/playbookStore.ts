@@ -111,6 +111,10 @@ function targetEntry(db: LensDb, op: ProposalOp, entryId: number | null): Playbo
   if (!entry) {
     throw new ProposalError('invalid', `${op} needs the entry_id of an existing entry`);
   }
+  // Retiring a retired entry changes nothing and would only add a change-log row.
+  if (op === 'retire' && entry.status === 'retired') {
+    throw new ProposalError('invalid', `entry ${entry.id} is already retired`);
+  }
   return entry;
 }
 
@@ -133,6 +137,19 @@ export function createProposal(
     throw new ProposalError('invalid', 'add must not name an entry_id');
   }
   const target = p.op === 'add' ? null : targetEntry(db, p.op, entryId);
+  // An AI edit that changes nothing would show two identical columns on the
+  // page, yet accepting it would make shipped default text count as the
+  // operator's (operatorBackedEntryIds). Seeding and the dashboard may still
+  // record an unchanged edit deliberately.
+  if (
+    p.op === 'edit' &&
+    p.proposed_by === 'ai' &&
+    target &&
+    target.title === p.title &&
+    target.body === p.body
+  ) {
+    throw new ProposalError('invalid', 'edit does not change the entry');
+  }
   // A retire records what is being retired, whatever text the caller sent.
   const { title, body } = p.op === 'retire' && target ? target : p;
   const row = db.conn

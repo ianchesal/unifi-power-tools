@@ -337,7 +337,12 @@ describe('operatorBackedEntryIds', () => {
   }
 
   const edit = (db: Db, entryId: number, proposed_by: ProposedBy, at: string) =>
-    createProposal(db, { ...addInput(proposed_by), op: 'edit', entry_id: entryId }, at);
+    createProposal(
+      db,
+      // Distinct text per edit: an ai edit that changes nothing is rejected.
+      { ...addInput(proposed_by), op: 'edit', entry_id: entryId, body: `${proposed_by} edit at ${at}` },
+      at
+    );
 
   it('includes entries added by the operator or an accepted ai proposal, not defaults', () => {
     const db = openLensDb(':memory:');
@@ -424,5 +429,54 @@ describe('operatorBackedEntryIds', () => {
     humanChange(db, { op: 'retire', entry_id: id }, T1);
     expect(operatorBackedEntryIds(db)).toEqual(new Set());
     db.close();
+  });
+
+  describe('minor fixes', () => {
+    const editInput = (db: Db, proposed_by: ProposedBy, title: string, body: string) => ({
+      op: 'edit' as const,
+      entry_id: seedEntry(db).id,
+      title,
+      body,
+      rationale: 'r',
+      evidence: { finding_ids: [], history_ids: [] },
+      proposed_by,
+    });
+
+    it('rejects an ai edit that changes nothing', () => {
+      const db = openLensDb(':memory:');
+      expect(errorCode(() => createProposal(db, editInput(db, 'ai', 'Seed', 'seed body'), T1))).toBe(
+        'invalid'
+      );
+    });
+
+    it('still allows a human or default edit with unchanged text', () => {
+      const db = openLensDb(':memory:');
+      expect(createProposal(db, editInput(db, 'default', 'Seed', 'seed body'), T1).status).toBe(
+        'pending'
+      );
+      expect(createProposal(db, editInput(db, 'human', 'Seed', 'seed body'), T1).status).toBe(
+        'pending'
+      );
+    });
+
+    it('rejects retiring an already retired entry', () => {
+      const db = openLensDb(':memory:');
+      const entry = seedEntry(db);
+      humanChange(db, { op: 'retire', entry_id: entry.id }, T1);
+      const retire = { ...addInput(), op: 'retire' as const, entry_id: entry.id };
+      expect(errorCode(() => createProposal(db, retire, T2))).toBe('invalid');
+      expect(errorCode(() => humanChange(db, { op: 'retire', entry_id: entry.id }, T2))).toBe(
+        'invalid'
+      );
+    });
+
+    it('rejects accepting a retire whose entry was retired in the meantime', () => {
+      const db = openLensDb(':memory:');
+      const entry = seedEntry(db);
+      const retire = { ...addInput(), op: 'retire' as const, entry_id: entry.id };
+      const pending = createProposal(db, retire, T1);
+      humanChange(db, { op: 'retire', entry_id: entry.id }, T1);
+      expect(errorCode(() => acceptProposal(db, pending.id, null, T2))).toBe('invalid');
+    });
   });
 });
