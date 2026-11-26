@@ -1,0 +1,296 @@
+import { describe, expect, it } from 'vitest';
+import { openLensDb } from '../../src/db/lensDb.js';
+import {
+  acceptProposal,
+  activeEntryIds,
+  createProposal,
+  humanChange,
+  listEntries,
+  listProposals,
+  ProposalError,
+  type ProposedBy,
+  rejectProposal,
+} from '../../src/db/playbookStore.js';
+
+const T0 = '2026-01-01T00:00:00.000Z';
+const T1 = '2026-01-02T00:00:00.000Z';
+const T2 = '2026-01-03T00:00:00.000Z';
+
+type Db = ReturnType<typeof openLensDb>;
+
+const addInput = (proposed_by: ProposedBy = 'ai') => ({
+  op: 'add' as const,
+  title: 'Host A VPN',
+  body: 'Hits on the VPN flows from host A are false positives',
+  rationale: 'seen twice',
+  evidence: { finding_ids: [1, 2], history_ids: [3] },
+  proposed_by,
+});
+
+const seedEntry = (db: Db) =>
+  humanChange(db, { op: 'add', title: 'Seed', body: 'seed body' }, T0).entry;
+
+function errorCode(fn: () => unknown): string | undefined {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof ProposalError) return err.code;
+    throw err;
+  }
+  return undefined;
+}
+
+describe('playbookStore', () => {
+  it('migration 5 creates the three tables', () => {
+    const db = openLensDb(':memory:');
+    const names = (
+      db.conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+        name: string;
+      }[]
+    ).map((r) => r.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'playbook_entries',
+        'playbook_proposals',
+        'playbook_defaults_seen',
+      ])
+    );
+    db.close();
+  });
+
+  it('an ai proposal is pending and creates no entry', () => {
+    const db = openLensDb(':memory:');
+    const proposal = createProposal(db, addInput(), T0);
+    expect(proposal).toMatchObject({
+      op: 'add',
+      entry_id: null,
+      status: 'pending',
+      proposed_by: 'ai',
+      created_at: T0,
+      decided_at: null,
+      decision_note: null,
+    });
+    expect(listEntries(db)).toEqual([]);
+    db.close();
+  });
+
+  it('accepting an add inserts an active entry linked to the proposal', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    const { proposal, entry } = acceptProposal(db, created.id, null, T1);
+    expect(entry).toMatchObject({
+      title: created.title,
+      body: created.body,
+      status: 'active',
+      source_proposal_id: created.id,
+      default_key: null,
+      created_at: T1,
+      updated_at: T1,
+    });
+    expect(proposal).toMatchObject({ status: 'accepted', decided_at: T1 });
+    expect(activeEntryIds(db).has(entry.id)).toBe(true);
+    expect(listEntries(db)).toEqual([entry]);
+    db.close();
+  });
+
+  it('accept with edits applies and records the edited text', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    const { proposal, entry } = acceptProposal(db, created.id, { body: 'edited' }, T1);
+    expect(entry.body).toBe('edited');
+    expect(entry.title).toBe(created.title);
+    expect(proposal.body).toBe('edited');
+    expect(listProposals(db)[0].body).toBe('edited');
+    db.close();
+  });
+
+  it('accept with blank edited text is invalid and leaves the proposal pending', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    expect(errorCode(() => acceptProposal(db, created.id, { title: '  ' }, T1))).toBe('invalid');
+    expect(listProposals(db)[0].status).toBe('pending');
+    expect(listEntries(db)).toEqual([]);
+    db.close();
+  });
+
+  it('accepting an edit updates the entry text and keeps its source', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    const created = createProposal(
+      db,
+      { ...addInput(), op: 'edit', entry_id: seeded.id, title: 'New', body: 'new body' },
+      T1
+    );
+    const { entry } = acceptProposal(db, created.id, null, T2);
+    expect(entry).toEqual({ ...seeded, title: 'New', body: 'new body', updated_at: T2 });
+    db.close();
+  });
+
+  it('edit of a retired entry reactivates it', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    humanChange(db, { op: 'retire', entry_id: seeded.id }, T1);
+    const created = createProposal(db, { ...addInput(), op: 'edit', entry_id: seeded.id }, T1);
+    const { entry } = acceptProposal(db, created.id, null, T2);
+    expect(entry.status).toBe('active');
+    db.close();
+  });
+
+  it('accepting a decided proposal is a conflict', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    acceptProposal(db, created.id, null, T1);
+    expect(errorCode(() => acceptProposal(db, created.id, null, T2))).toBe('conflict');
+    expect(errorCode(() => rejectProposal(db, created.id, null, T2))).toBe('conflict');
+    expect(listEntries(db)).toHaveLength(1);
+    expect(listProposals(db)[0]).toMatchObject({ status: 'accepted', decided_at: T1 });
+    db.close();
+  });
+
+  it('rejecting records the note and creates no entry', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    const rejected = rejectProposal(db, created.id, 'too broad', T1);
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      decided_at: T1,
+      decision_note: 'too broad',
+    });
+    expect(listEntries(db)).toEqual([]);
+    expect(errorCode(() => acceptProposal(db, created.id, null, T2))).toBe('conflict');
+    db.close();
+  });
+
+  it('accepting or rejecting an unknown proposal is not_found', () => {
+    const db = openLensDb(':memory:');
+    expect(errorCode(() => acceptProposal(db, 999, null, T0))).toBe('not_found');
+    expect(errorCode(() => rejectProposal(db, 999, null, T0))).toBe('not_found');
+    db.close();
+  });
+
+  it('edit or retire of a missing entry is invalid', () => {
+    const db = openLensDb(':memory:');
+    for (const op of ['edit', 'retire'] as const) {
+      expect(errorCode(() => createProposal(db, { ...addInput(), op, entry_id: 999 }, T0))).toBe(
+        'invalid'
+      );
+      expect(errorCode(() => createProposal(db, { ...addInput(), op }, T0))).toBe('invalid');
+    }
+    expect(listProposals(db)).toEqual([]);
+    db.close();
+  });
+
+  it('accepting a proposal whose entry vanished is invalid and leaves it pending', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    const created = createProposal(db, { ...addInput(), op: 'retire', entry_id: seeded.id }, T1);
+    db.conn.prepare('DELETE FROM playbook_entries WHERE id = ?').run(seeded.id);
+    expect(errorCode(() => acceptProposal(db, created.id, null, T2))).toBe('invalid');
+    expect(listProposals(db)[0]).toMatchObject({ id: created.id, status: 'pending' });
+    db.close();
+  });
+
+  it('add with an entry_id is invalid', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    expect(errorCode(() => createProposal(db, { ...addInput(), entry_id: seeded.id }, T0))).toBe(
+      'invalid'
+    );
+    db.close();
+  });
+
+  it('blank title is invalid', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    expect(errorCode(() => createProposal(db, { ...addInput(), title: '  ' }, T0))).toBe(
+      'invalid'
+    );
+    expect(errorCode(() => createProposal(db, { ...addInput(), body: '' }, T0))).toBe('invalid');
+    expect(
+      errorCode(() =>
+        createProposal(db, { ...addInput(), op: 'edit', entry_id: seeded.id, title: '' }, T0)
+      )
+    ).toBe('invalid');
+    db.close();
+  });
+
+  it('humanChange records an accepted human proposal', () => {
+    const db = openLensDb(':memory:');
+    const { proposal, entry } = humanChange(
+      db,
+      { op: 'add', title: 'Mine', body: 'my body', rationale: 'because' },
+      T0
+    );
+    expect(proposal).toMatchObject({
+      op: 'add',
+      proposed_by: 'human',
+      status: 'accepted',
+      rationale: 'because',
+      evidence: { finding_ids: [], history_ids: [] },
+      created_at: T0,
+      decided_at: T0,
+    });
+    expect(entry).toMatchObject({ title: 'Mine', body: 'my body', status: 'active' });
+    expect(listEntries(db)).toEqual([entry]);
+    db.close();
+  });
+
+  it('humanChange retire copies the missing title and body from the entry', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    const { proposal, entry } = humanChange(db, { op: 'retire', entry_id: seeded.id }, T1);
+    expect(proposal).toMatchObject({
+      op: 'retire',
+      entry_id: seeded.id,
+      title: 'Seed',
+      body: 'seed body',
+    });
+    expect(entry.status).toBe('retired');
+    db.close();
+  });
+
+  it('humanChange add or edit without text is invalid and records nothing', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    expect(errorCode(() => humanChange(db, { op: 'add', title: 'only' }, T1))).toBe('invalid');
+    expect(
+      errorCode(() => humanChange(db, { op: 'edit', entry_id: seeded.id, body: 'only' }, T1))
+    ).toBe('invalid');
+    expect(errorCode(() => humanChange(db, { op: 'retire', entry_id: 999 }, T1))).toBe('invalid');
+    expect(listProposals(db)).toHaveLength(1);
+    expect(listEntries(db)).toEqual([seeded]);
+    db.close();
+  });
+
+  it('retire removes the id from activeEntryIds', () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    expect(activeEntryIds(db)).toEqual(new Set([seeded.id]));
+    humanChange(db, { op: 'retire', entry_id: seeded.id }, T1);
+    expect(activeEntryIds(db)).toEqual(new Set());
+    expect(listEntries(db, { status: 'active' })).toEqual([]);
+    expect(listEntries(db, { status: 'retired' }).map((e) => e.id)).toEqual([seeded.id]);
+    db.close();
+  });
+
+  it('lists entries by id and proposals newest first, filtered by status', () => {
+    const db = openLensDb(':memory:');
+    const first = createProposal(db, addInput(), T1);
+    const second = createProposal(db, addInput(), T2);
+    const oldest = createProposal(db, addInput(), T0);
+    expect(listProposals(db).map((p) => p.id)).toEqual([second.id, first.id, oldest.id]);
+    const a = acceptProposal(db, second.id, null, T2).entry;
+    const b = acceptProposal(db, first.id, null, T2).entry;
+    expect(listEntries(db).map((e) => e.id)).toEqual([a.id, b.id]);
+    expect(listProposals(db, { status: 'pending' }).map((p) => p.id)).toEqual([oldest.id]);
+    db.close();
+  });
+
+  it('evidence round-trips as an object', () => {
+    const db = openLensDb(':memory:');
+    const created = createProposal(db, addInput(), T0);
+    expect(created.evidence).toEqual({ finding_ids: [1, 2], history_ids: [3] });
+    expect(listProposals(db)[0].evidence).toEqual({ finding_ids: [1, 2], history_ids: [3] });
+    db.close();
+  });
+});
