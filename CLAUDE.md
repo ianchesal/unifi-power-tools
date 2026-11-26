@@ -209,11 +209,15 @@ Operator-approved entries about this network, learned through proposals.
   status change only when a proposal is accepted (`add`, `edit`, `retire`;
   nothing is deleted, and an edit reactivates a retired entry). The store owns a retire's
   text: it copies the entry's title and body at creation and again at accept,
-  ignoring the caller's text and edits. `humanChange` records a dashboard change
-  as a proposal and accepts it at once, so the proposal table is the change log.
-  MCP can only create pending `ai` proposals; accepting and rejecting happen only
-  over REST (`api/playbook.ts`), where every write requires a JSON body so a
-  cross-site request can't make one.
+  ignoring the caller's text and edits. Retiring an already retired entry is
+  rejected, as is an `ai` edit whose text matches the entry: accepting that would
+  make default text operator-backed while the page shows two identical columns.
+  `humanChange` records a dashboard change as a proposal and accepts it at once,
+  so the proposal table is the change log. MCP can only create pending `ai`
+  proposals. Outside seeding (which accepts a new default's `add` and rejects a
+  superseded default update), only REST (`api/playbook.ts`) accepts or rejects:
+  every write there requires a JSON body so a cross-site request can't make one,
+  and the accept body is strict, so a misspelled field is a 400.
 - **Operator-backed** (`operatorBackedEntryIds`): active entries whose latest
   accepted proposal isn't `proposed_by: 'default'`, or has `edited_on_accept`
   (the accepted title or body differs from what was proposed). So a default
@@ -230,8 +234,9 @@ Operator-approved entries about this network, learned through proposals.
   `key` is stable forever; raise `version` when changing the text.
 - **Learning loop:** `get_feedback` returns unreviewed
   `human_closed_handled` / `human_closed_not_concern` / `human_reopened` history
-  rows, a reopen carrying `reopened_from` (the close it undid, whose summary
-  names a rule); `mark_feedback_considered` sets `feedback_considered_at`. The
+  rows. A reopen carries `reopened_from`: the close it undid, whose summary names
+  the rule when a rule closed it, or null when no close is on record.
+  `mark_feedback_considered` sets `feedback_considered_at`. The
   run procedure in `core.ts` drives both.
 - **Import prompt:** `import_knowledge` has a session split its own notes into a
   `homelab-services.json` fragment (mechanical host/port facts), `ai` proposals

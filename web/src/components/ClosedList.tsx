@@ -192,7 +192,11 @@ function ClosedRow({
     <div className="finding-card">
       <FindingIdentity finding={finding} badge={badge} />
       {finding.closed_reason && <p className="analysis-body">{finding.closed_reason}</p>}
-      <ReliedOn raw={finding.latest_analysis?.cited_entries ?? null} titles={entryTitles} />
+      {/* Only an AI close relied on entries; an earlier attention verdict's citations don't explain a human close. */}
+      <ReliedOn
+        raw={finding.closed_by === 'ai' ? (finding.latest_analysis?.cited_entries ?? null) : null}
+        titles={entryTitles}
+      />
       <div className="finding-actions">
         <button className="btn btn-danger-ghost" type="button" disabled={busy} onClick={openNote}>
           This was wrong

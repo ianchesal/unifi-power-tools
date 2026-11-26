@@ -212,6 +212,12 @@ function ProposalCard({ proposal, ...actions }: { proposal: PlaybookProposal } &
           accept with your own changes makes it yours.
         </p>
       )}
+      {proposal.missing_evidence_count > 0 && (
+        <p className="muted-line">
+          {proposal.missing_evidence_count} cited finding{proposal.missing_evidence_count === 1 ? '' : 's'} no
+          longer exist{proposal.missing_evidence_count === 1 ? 's' : ''}.
+        </p>
+      )}
       {evidence.length > 0 && (
         <div className="evidence-list">
           <span className="diff-label">Evidence</span>
