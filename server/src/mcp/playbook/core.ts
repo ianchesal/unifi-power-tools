@@ -128,7 +128,7 @@ Site knowledge changes only when the operator accepts a proposal. Use \`propose_
 - **Be specific:** name exact hosts, ports, signatures or CIDRs. Never propose a broad entry.
 - **Cite evidence:** the finding ids in \`evidence.finding_ids\` and the history row ids in \`evidence.history_ids\`, with the reason in \`rationale\`.
 - **Don't overlap:** edit or retire an existing entry (\`op\` \`edit\` or \`retire\` with its \`entry_id\`) rather than adding one beside it.
-- **Rule closes:** rules run before you, so no entry can undo a wrong rule close. When the operator reopened a finding a rule closed, say so in the rationale: "rule X closed this; consider narrowing it".
+- **Rule closes:** rules run before you, so no entry can undo a wrong rule close. A \`human_reopened\` row from \`get_feedback\` says what it undid in \`reopened_from\` (\`kind\`, \`summary\`); when the kind is \`rule_closed\` or \`recheck_rule_still_closed\`, the summary names the rule, so say in the rationale: "rule X closed this; consider narrowing it". If \`reopened_from\` is null, don't guess what closed it.
 - **Not the registry:** a lesson of the form "host H, port P, always benign" belongs in the \`HOMELAB_SERVICES_PATH\` registry, which the rules use mechanically. It is a file the operator edits, so report it below instead of proposing it.
 
 End the run with a summary for the operator:

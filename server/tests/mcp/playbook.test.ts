@@ -102,6 +102,7 @@ describe('core playbook: learning loop', () => {
     expect(improvements()).toMatch(/finding_ids[\s\S]*history_ids/);
     expect(improvements()).toMatch(/edit or retire/i);
     expect(improvements()).toContain('closed this; consider narrowing it');
+    expect(improvements()).toMatch(/`reopened_from`[^\n]*closed this; consider narrowing it/);
     expect(improvements()).toMatch(/Registry candidates/);
     expect(improvements()).toMatch(/Rule candidates/);
     expect(improvements()).not.toMatch(/no tools for changing site knowledge/);

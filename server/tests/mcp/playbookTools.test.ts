@@ -2,6 +2,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import { applyTrigger } from '../../src/analysis/findings.js';
+import {
+  applyAiVerdict,
+  closeByRule,
+  humanClose,
+  humanReopen,
+  queueForAnalysis,
+  recheckStillClosed,
+} from '../../src/analysis/pipeline.js';
 import { addHistory, type HistoryKind } from '../../src/db/findingHistoryStore.js';
 import { updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
@@ -131,6 +139,83 @@ describe('feedback tools', () => {
     expect(await json(client, 'mark_feedback_considered', { ids: [] })).toEqual({ marked: 0 });
     const rows = await json(client, 'get_feedback');
     expect(rows.map((r: { id: number }) => r.id)).not.toContain(handled.id);
+  });
+});
+
+describe('get_feedback: what a reopen undid', () => {
+  const match = {
+    rule: 'reputation_blocklist' as const,
+    verdict: { recommendation: 'blocked blocklist hit', riskLevel: 'low' as const },
+  };
+
+  const finding = (db: LensDb, key: string) =>
+    upsertFinding(db, applyTrigger(null, 'new_source_ip', 't0', 'source_ip', key));
+
+  type Row = { kind: string; finding_id: number; reopened_from: unknown };
+  const feedback = async (db: LensDb): Promise<Row[]> =>
+    json(await connect(db), 'get_feedback');
+
+  it('names the rule behind a reopened rule close', async () => {
+    const db = openLensDb(':memory:');
+    const f = finding(db, '198.51.100.1');
+    closeByRule(db, f, match, 't1');
+    humanReopen(db, f.id as number, 'wrong', 't2');
+    const rows = await feedback(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reopened_from).toEqual({
+      kind: 'rule_closed',
+      summary: 'Closed by rule reputation_blocklist',
+    });
+  });
+
+  it('reports the latest close before the reopen, such as a rule recheck', async () => {
+    const db = openLensDb(':memory:');
+    const f = finding(db, '198.51.100.1');
+    const closed = closeByRule(db, f, match, 't1');
+    recheckStillClosed(db, closed, match, 't2');
+    humanReopen(db, f.id as number, 'wrong', 't3');
+    expect((await feedback(db))[0].reopened_from).toEqual({
+      kind: 'recheck_rule_still_closed',
+      summary: 'Recheck: rule reputation_blocklist still closes this finding',
+    });
+  });
+
+  it('shows a reopened AI close with its summary', async () => {
+    const db = openLensDb(':memory:');
+    const f = finding(db, '198.51.100.1');
+    const request = queueForAnalysis(db, f, 't1');
+    applyAiVerdict(
+      db,
+      request.id,
+      { verdict: 'close', risk_level: 'low', summary: 'benign scanner', reasoning: 'r' },
+      {
+        unblockedIpsAlertsSinceDecision: 0,
+        activeEntryIds: new Set<number>(),
+        operatorBackedEntryIds: new Set<number>(),
+      },
+      't2'
+    );
+    humanReopen(db, f.id as number, 'wrong', 't3');
+    expect((await feedback(db))[0].reopened_from).toEqual({
+      kind: 'ai_closed',
+      summary: 'benign scanner',
+    });
+  });
+
+  it('uses only earlier closes of the same finding, and only for reopen rows', async () => {
+    const db = openLensDb(':memory:');
+    const other = finding(db, '198.51.100.2');
+    closeByRule(db, other, match, 't1');
+    // A reopen with no close on record (e.g. closed before history existed).
+    const bare = historyRow(db, '198.51.100.1', 'human_reopened', 'attention', 't2');
+    humanClose(db, bare.finding_id, 'handled', null, 't3');
+    humanReopen(db, bare.finding_id, 'again', 't4');
+    const rows = await feedback(db);
+    expect(rows.map((r) => [r.kind, r.reopened_from])).toEqual([
+      ['human_reopened', null],
+      ['human_closed_handled', null],
+      ['human_reopened', { kind: 'human_closed_handled', summary: 'Closed as handled' }],
+    ]);
   });
 });
 
