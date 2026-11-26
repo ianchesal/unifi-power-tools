@@ -20,6 +20,9 @@ export interface Config {
   lanCidrs: string[];
   logLevel: LogLevel;
   mcpSecret: string;
+  dashboardPassword: string;
+  // Passed to Express `trust proxy` verbatim (numeric strings as hop counts).
+  trustProxy: string | null;
   trustedAdminNames: string[];
   safeSignaturePrefixes: string[];
   homelabServicesPath: string;
@@ -73,6 +76,19 @@ export function loadConfig(): Config {
   if (!process.env.MCP_SECRET?.trim()) {
     throw new Error('Missing required environment variable: MCP_SECRET');
   }
+  const dashboardPassword = process.env.DASHBOARD_PASSWORD ?? '';
+  if (!dashboardPassword.trim()) {
+    throw new Error('Missing required environment variable: DASHBOARD_PASSWORD');
+  }
+  if (dashboardPassword === process.env.MCP_SECRET) {
+    throw new Error('DASHBOARD_PASSWORD must differ from MCP_SECRET');
+  }
+  const trustProxy = process.env.TRUST_PROXY?.trim() || null;
+  if (trustProxy?.toLowerCase() === 'true') {
+    throw new Error(
+      "TRUST_PROXY must name the proxy (an address, subnet or hop count), never 'true'"
+    );
+  }
 
   const validLevels: LogLevel[] = ['error', 'warn', 'info', 'debug'];
   const rawLogLevel = process.env.LOG_LEVEL ?? 'info';
@@ -94,6 +110,8 @@ export function loadConfig(): Config {
     lanCidrs,
     logLevel: rawLogLevel as LogLevel,
     mcpSecret: process.env.MCP_SECRET,
+    dashboardPassword,
+    trustProxy,
     trustedAdminNames: parseCommaList(process.env.TRUSTED_ADMIN_NAMES),
     safeSignaturePrefixes: process.env.SAFE_SIGNATURE_PREFIXES
       ? parseCommaList(process.env.SAFE_SIGNATURE_PREFIXES)

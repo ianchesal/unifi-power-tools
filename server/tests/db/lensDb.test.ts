@@ -231,4 +231,11 @@ describe('openLensDb', () => {
       db.close();
     });
   });
+
+  it('has a meta key/value table', () => {
+    const db = openLensDb(':memory:');
+    db.conn.prepare("INSERT INTO meta (key, value) VALUES ('k', 'v')").run();
+    expect(db.conn.prepare("SELECT value FROM meta WHERE key = 'k'").get()).toEqual({ value: 'v' });
+  });
 });
+

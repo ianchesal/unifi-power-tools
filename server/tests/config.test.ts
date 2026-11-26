@@ -6,6 +6,8 @@ describe('loadConfig', () => {
 
   beforeEach(() => {
     process.env.MCP_SECRET = 'test-secret';
+    process.env.DASHBOARD_PASSWORD = 'dash-password';
+    delete process.env.TRUST_PROXY;
   });
 
   afterEach(() => {
@@ -74,6 +76,31 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.trustedAdminNames).toEqual(['Ian C.', 'Jane Doe']);
     expect(config.safeSignaturePrefixes).toEqual(['ET DROP', 'ET CUSTOM']);
+  });
+
+  it('throws when DASHBOARD_PASSWORD is missing', () => {
+    delete process.env.DASHBOARD_PASSWORD;
+    expect(() => loadConfig()).toThrow(/DASHBOARD_PASSWORD/);
+  });
+
+  it('throws when DASHBOARD_PASSWORD equals MCP_SECRET', () => {
+    process.env.DASHBOARD_PASSWORD = 'test-secret';
+    expect(() => loadConfig()).toThrow(/DASHBOARD_PASSWORD must differ from MCP_SECRET/);
+  });
+
+  it('reads DASHBOARD_PASSWORD', () => {
+    expect(loadConfig().dashboardPassword).toBe('dash-password');
+  });
+
+  it('defaults TRUST_PROXY to null and passes other values through', () => {
+    expect(loadConfig().trustProxy).toBeNull();
+    process.env.TRUST_PROXY = '172.18.0.2';
+    expect(loadConfig().trustProxy).toBe('172.18.0.2');
+  });
+
+  it.each(['true', 'TRUE', 'True'])('rejects TRUST_PROXY=%s', (v) => {
+    process.env.TRUST_PROXY = v;
+    expect(() => loadConfig()).toThrow(/TRUST_PROXY/);
   });
 
   describe('UniFi', () => {

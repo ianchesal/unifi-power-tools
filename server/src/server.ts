@@ -6,10 +6,12 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import rateLimit from 'express-rate-limit';
 import { type RunnerDeps, runHourlyChecks, runRuleTriageBackfill } from './analysis/runner.js';
 import { createAnalysisRequestsRouter } from './api/analysisRequests.js';
+import { createAuthRouter, requireJsonOnWrites, requireSession } from './api/auth.js';
 import { createEventsRouter } from './api/events.js';
 import { createFindingsRouter } from './api/findings.js';
 import { createPlaybookRouter } from './api/playbook.js';
 import { secretEquals } from './auth/secretCompare.js';
+import { getOrCreateSessionSecret, sessionKey } from './auth/session.js';
 import type { Config } from './config.js';
 import type { EventsDb } from './db/eventsDb.js';
 import type { LensDb } from './db/lensDb.js';
@@ -30,6 +32,15 @@ export interface AppDeps {
 export function createApp(deps: AppDeps, config: Config) {
   const { eventsDb, lensDb, runnerDeps, listener, unifiClient } = deps;
   const app = express();
+  // Off unless TRUST_PROXY names the proxy (never `true`: port 3002 is also
+  // reachable directly, and a client could forge X-Forwarded-For). Set before
+  // the rate limiters so they key on the right address.
+  if (config.trustProxy !== null) {
+    app.set(
+      'trust proxy',
+      /^\d+$/.test(config.trustProxy) ? Number(config.trustProxy) : config.trustProxy
+    );
+  }
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000,
@@ -88,6 +99,17 @@ export function createApp(deps: AppDeps, config: Config) {
     }
     res.status(core.status === 'ok' ? 200 : 503).json({ ...core, unifi });
   });
+
+  // Dashboard auth: /api/auth is open, everything else under /api needs a
+  // session cookie, and writes must be JSON. /mcp (bearer) and /health, /ready
+  // sit outside /api and are unaffected.
+  const sessionSigningKey = sessionKey(getOrCreateSessionSecret(lensDb), config.dashboardPassword);
+  app.use(
+    '/api/auth',
+    createAuthRouter({ key: sessionSigningKey, password: config.dashboardPassword })
+  );
+  app.use('/api', requireSession(sessionSigningKey));
+  app.use('/api', requireJsonOnWrites);
 
   app.use('/api', createEventsRouter(eventsDb));
   app.use('/api', createFindingsRouter(lensDb, eventsDb));

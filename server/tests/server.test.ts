@@ -1,44 +1,8 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import type { RunnerDeps } from '../src/analysis/runner.js';
-import type { Config } from '../src/config.js';
-import { type EventsDb, openEventsDb } from '../src/db/eventsDb.js';
-import { openLensDb } from '../src/db/lensDb.js';
-import { type AppDeps, createApp } from '../src/server.js';
-import { stubUnifiClient } from './helpers.js';
-
-export const baseConfig = {
-  port: 3002,
-  host: '127.0.0.1',
-  eventsDbPath: ':memory:',
-  lensDbPath: ':memory:',
-  lanCidrs: [],
-  logLevel: 'error' as const,
-  mcpSecret: 'test-secret',
-  trustedAdminNames: [],
-  safeSignaturePrefixes: ['ET DROP'],
-  homelabServicesPath: '/nonexistent/homelab-services.json',
-  retentionDays: 90,
-  syslogUdpPort: 10514,
-  syslogBindAddress: '127.0.0.1',
-  maxMessageBytes: 16384,
-} as unknown as Config;
-
-const boundListener = { bound: () => true, droppedCount: () => 0 };
-
-function deps(overrides: Partial<AppDeps> = {}): AppDeps {
-  const lensDb = openLensDb(':memory:');
-  const eventsDb: EventsDb = openEventsDb(':memory:').reader;
-  const runnerDeps: RunnerDeps = {
-    eventsDb,
-    lensDb,
-    lanCidrs: [],
-    trustedAdminNames: [],
-    safeSignaturePrefixes: ['ET DROP'],
-    homelabServices: {},
-  };
-  return { eventsDb, lensDb, runnerDeps, listener: boundListener, unifiClient: null, ...overrides };
-}
+import { openEventsDb } from '../src/db/eventsDb.js';
+import { createApp } from '../src/server.js';
+import { appDeps as deps, baseConfig, loginAgent, stubUnifiClient } from './helpers.js';
 
 describe('createApp /health', () => {
   it('reports ok with a bound listener and a readable events DB', async () => {
@@ -157,12 +121,17 @@ describe('createApp /mcp auth', () => {
     expect(res.status).not.toBe(401);
   });
 
-  it.todo('rejects a valid session cookie with no bearer (filled in with dashboard auth)');
+  it('rejects a valid session cookie with no bearer', async () => {
+    const agent = await loginAgent(createApp(deps(), baseConfig));
+    const res = await agent.post('/mcp').send({});
+    expect(res.status).toBe(401);
+  });
 });
 
 describe('createApp /api/playbook', () => {
   it('is mounted', async () => {
-    const res = await request(createApp(deps(), baseConfig)).get('/api/playbook');
+    const agent = await loginAgent(createApp(deps(), baseConfig));
+    const res = await agent.get('/api/playbook');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ entries: [], registry: {} });
   });
@@ -170,9 +139,8 @@ describe('createApp /api/playbook', () => {
 
 describe('createApp /api/admin/backfill-rule-triage', () => {
   it('runs the backfill and returns its result shape', async () => {
-    const res = await request(createApp(deps(), baseConfig)).post(
-      '/api/admin/backfill-rule-triage'
-    );
+    const agent = await loginAgent(createApp(deps(), baseConfig));
+    const res = await agent.post('/api/admin/backfill-rule-triage').send({});
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       checked: 0,
@@ -197,7 +165,7 @@ describe('createApp route precedence', () => {
     const health = await request(app).get('/health');
     expect(health.status).toBe(200);
 
-    const findings = await request(app).get('/api/findings');
+    const findings = await (await loginAgent(app)).get('/api/findings');
     expect(findings.status).toBe(200);
     expect(Array.isArray(findings.body)).toBe(true);
   });
