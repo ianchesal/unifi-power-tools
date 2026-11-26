@@ -95,3 +95,58 @@ export interface PendingAnalysis extends AnalysisRequest {
   entity_key: string;
   severity_score: number;
 }
+
+export type ProposalOp = 'add' | 'edit' | 'retire';
+export type ProposedBy = 'ai' | 'human' | 'default';
+
+export interface PlaybookEntry {
+  id: number;
+  title: string;
+  body: string;
+  status: 'active' | 'retired';
+  created_at: string;
+  updated_at: string;
+  source_proposal_id: number | null;
+  default_key: string | null;
+  // Still shipped default text. Meaningful on active entries only.
+  is_default: boolean;
+}
+
+// A host in the read-only homelab services registry (HOMELAB_SERVICES_PATH).
+export interface HomelabHost {
+  label: string;
+  notes?: string[];
+  services?: { port: number; name: string; description?: string }[];
+  wanExposed?: boolean;
+}
+
+export interface Playbook {
+  // Active entries first, then retired.
+  entries: PlaybookEntry[];
+  registry: Record<string, HomelabHost>;
+}
+
+export interface EvidenceFinding {
+  id: number;
+  entity_type: EntityType;
+  entity_key: string;
+  status: FindingStatus;
+}
+
+export interface PlaybookProposal {
+  id: number;
+  op: ProposalOp;
+  entry_id: number | null;
+  title: string;
+  body: string;
+  rationale: string;
+  evidence: { finding_ids: number[]; history_ids: number[] };
+  status: 'pending' | 'accepted' | 'rejected';
+  proposed_by: ProposedBy;
+  created_at: string;
+  decided_at: string | null;
+  decision_note: string | null;
+  evidence_findings: EvidenceFinding[];
+  // The entry an edit or retire acts on, as it is now; null for an add.
+  current: { title: string; body: string; status: PlaybookEntry['status'] } | null;
+}

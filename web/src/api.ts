@@ -15,9 +15,9 @@ export class ApiError extends Error {
   }
 }
 
-export async function postJson<T>(path: string, body?: unknown): Promise<T> {
+async function sendJson<T>(method: 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
-    method: 'POST',
+    method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -32,6 +32,14 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
     throw new ApiError(message, res.status);
   }
   return res.json() as Promise<T>;
+}
+
+export function postJson<T>(path: string, body?: unknown): Promise<T> {
+  return sendJson<T>('POST', path, body);
+}
+
+export function putJson<T>(path: string, body: unknown): Promise<T> {
+  return sendJson<T>('PUT', path, body);
 }
 
 // The message to show inline for a failed action: ApiError carries the
