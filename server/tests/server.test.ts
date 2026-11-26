@@ -70,6 +70,16 @@ describe('createApp /mcp auth', () => {
   });
 });
 
+describe('createApp /api/playbook', () => {
+  it('is mounted, even with no sink DB', async () => {
+    const lensDb = openLensDb(':memory:');
+    const app = createApp(null, lensDb, null, baseConfig, null);
+    const res = await request(app).get('/api/playbook');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ entries: [], registry: {} });
+  });
+});
+
 describe('createApp /api/admin/backfill-rule-triage', () => {
   it('returns 503 when the sink DB is unavailable (runnerDeps null)', async () => {
     const lensDb = openLensDb(':memory:');
