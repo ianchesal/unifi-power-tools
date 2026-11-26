@@ -24,7 +24,7 @@ async function connect({
     lensDb,
     eventsDb,
     unifi,
-    unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
+    enricher: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   }, { trustedAdminNames: ['alice'] });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

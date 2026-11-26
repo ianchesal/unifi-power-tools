@@ -11,23 +11,28 @@ import { getFinding, updateFindingState, upsertFinding } from '../../src/db/find
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import type { EventsDb } from '../../src/db/eventsDb.js';
 import type { HomelabRegistry } from '../../src/enrichment/homelabServices.js';
-import type { UnifiMcpClient } from '../../src/enrichment/unifiMcpClient.js';
+import { createUnifiEnricher, type UnifiEnricher } from '../../src/enrichment/unifiEnricher.js';
 import { type AnalysisDeps, buildAnalysisContext } from '../../src/mcp/context.js';
 import { runHourlyChecks } from '../../src/analysis/runner.js';
-import { runnerDeps, seededEventsDb } from '../helpers.js';
+import { runnerDeps, seededEventsDb, stubUnifiClient } from '../helpers.js';
 
 const NOW = '2026-11-25T12:00:00.000Z';
 const FIRST_SEEN = '2026-11-20T00:00:00.000Z';
 const IP = '198.51.100.4';
 const MAC = 'aa:aa:aa:aa:aa:01';
 
-const stubUnifi: UnifiMcpClient = {
+const stubUnifi: UnifiEnricher = {
   resolveClient: async () => null,
   getFirewallSummary: async () => null,
 };
 
-function deps(lensDb: LensDb, eventsDb: EventsDb | null, homelabServices: HomelabRegistry = {}): AnalysisDeps {
-  return { lensDb, eventsDb, unifiMcp: stubUnifi, homelabServices };
+function deps(
+  lensDb: LensDb,
+  eventsDb: EventsDb,
+  homelabServices: HomelabRegistry = {},
+  enricher: UnifiEnricher = stubUnifi
+): AnalysisDeps {
+  return { lensDb, eventsDb, enricher, homelabServices };
 }
 
 function ipFinding(db: LensDb): Finding {
@@ -220,3 +225,35 @@ describe('buildAnalysisContext', () => {
     expect(ctx.finding).toMatchObject({ display_name: null });
   });
 });
+
+describe('buildAnalysisContext enrichment', () => {
+  it('still returns a context with null enrichment when UniFi is down', async () => {
+    const down = createUnifiEnricher({
+      ...stubUnifiClient,
+      get: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    });
+    const lensDb = openLensDb(':memory:');
+    const f = ipFinding(lensDb);
+    const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
+    const ctx = await buildAnalysisContext(deps(lensDb, seededEventsDb([]), {}, down), request, f, NOW);
+    expect(ctx.knownClient).toBeNull();
+    expect(ctx.firewallSummary).toBeNull();
+    expect(ctx.finding.id).toBe(f.id);
+  });
+
+  it('carries the resolved client name for a source IP finding', async () => {
+    const up = createUnifiEnricher({
+      ...stubUnifiClient,
+      get: async <T>(path: string) =>
+        (path === 'stat/alluser' ? [{ ip: IP, name: 'nas', network: 'LAN' }] : []) as T[],
+    });
+    const lensDb = openLensDb(':memory:');
+    const f = ipFinding(lensDb);
+    const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
+    const ctx = await buildAnalysisContext(deps(lensDb, seededEventsDb([]), {}, up), request, f, NOW);
+    expect(ctx.knownClient).toEqual({ name: 'nas', network: 'LAN' });
+  });
+});
+

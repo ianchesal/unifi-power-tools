@@ -23,7 +23,7 @@ import {
   type HomelabRegistry,
   type lookupHomelabService,
 } from '../enrichment/homelabServices.js';
-import type { UnifiMcpClient } from '../enrichment/unifiMcpClient.js';
+import type { UnifiEnricher } from '../enrichment/unifiEnricher.js';
 
 // The bundle a Claude Code session reasons over, built when the request is
 // fetched (not when it is queued) so it reflects the sink as it is now.
@@ -36,7 +36,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface AnalysisDeps {
   lensDb: LensDb;
   eventsDb: EventsDb;
-  unifiMcp: UnifiMcpClient;
+  enricher: UnifiEnricher;
   homelabServices: HomelabRegistry;
 }
 
@@ -50,7 +50,7 @@ export interface AnalysisContext {
   history: FindingHistoryRow[];
   prior_analyses: Omit<AnalysisRequestRow, 'context'>[];
   knownClient: { name: string; network: string } | null;
-  firewallSummary: unknown | null;
+  firewallSummary: string | null;
   recentEvents: (StoredEvent & { homelab: ReturnType<typeof lookupHomelabService> })[];
   baselineHistory: BaselineRow[];
   since_last_decision: { since: string; total: number; unblocked_ips_alerts: number } | null;
@@ -119,10 +119,10 @@ export async function buildAnalysisContext(
   finding: Finding,
   nowIso: string
 ): Promise<AnalysisContext> {
-  const { lensDb, eventsDb, unifiMcp, homelabServices } = deps;
+  const { lensDb, eventsDb, enricher, homelabServices } = deps;
   const knownClient =
-    finding.entity_type === 'source_ip' ? await unifiMcp.resolveClient(finding.entity_key) : null;
-  const firewallSummary = await unifiMcp.getFirewallSummary();
+    finding.entity_type === 'source_ip' ? await enricher.resolveClient(finding.entity_key) : null;
+  const firewallSummary = await enricher.getFirewallSummary();
 
   const priorAnalyses = getAnalysisRequestsForFinding(lensDb, finding.id as number)
     .filter((r) => r.status === 'answered' && r.id !== request.id)

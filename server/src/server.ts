@@ -14,7 +14,7 @@ import type { Config } from './config.js';
 import type { EventsDb } from './db/eventsDb.js';
 import type { LensDb } from './db/lensDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
-import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
+import { createUnifiEnricher } from './enrichment/unifiEnricher.js';
 import type { SyslogListener } from './ingest/listener.js';
 import { createMcpServer } from './mcp/server.js';
 import type { IUnifiClient } from './unifi/client.js';
@@ -40,7 +40,7 @@ export function createApp(deps: AppDeps, config: Config) {
   );
   app.use(express.json());
 
-  const unifiMcp = createUnifiMcpClient(config.unifiMcpServerUrl, config.unifiMcpServerToken);
+  const enricher = createUnifiEnricher(unifiClient);
   const homelabServices = loadHomelabServices(config.homelabServicesPath);
 
   const mcpAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
@@ -109,7 +109,7 @@ export function createApp(deps: AppDeps, config: Config) {
       {
         lensDb,
         eventsDb,
-        unifiMcp,
+        enricher,
         homelabServices,
         unifi: unifiClient
           ? { client: unifiClient, allowWrites: config.unifi?.allowWrites === true }

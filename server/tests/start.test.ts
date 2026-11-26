@@ -21,8 +21,6 @@ function config(): Config {
     syslogBindAddress: '127.0.0.1',
     maxMessageBytes: 16384,
     lanCidrs: [],
-    unifiMcpServerUrl: null,
-    unifiMcpServerToken: null,
     logLevel: 'error',
     mcpSecret: 'test-secret',
     trustedAdminNames: [],

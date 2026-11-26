@@ -26,7 +26,7 @@ async function connectedClient(lensDb: LensDb, eventsDb: EventsDb = seededEvents
   registerAnalysisTools(server, {
     lensDb,
     eventsDb,
-    unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
+    enricher: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

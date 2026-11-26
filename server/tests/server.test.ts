@@ -13,8 +13,6 @@ export const baseConfig = {
   eventsDbPath: ':memory:',
   lensDbPath: ':memory:',
   lanCidrs: [],
-  unifiMcpServerUrl: null,
-  unifiMcpServerToken: null,
   logLevel: 'error' as const,
   mcpSecret: 'test-secret',
   trustedAdminNames: [],

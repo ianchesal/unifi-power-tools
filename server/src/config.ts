@@ -18,8 +18,6 @@ export interface Config {
   maxMessageBytes: number;
   lensDbPath: string;
   lanCidrs: string[];
-  unifiMcpServerUrl: string | null;
-  unifiMcpServerToken: string | null;
   logLevel: LogLevel;
   mcpSecret: string;
   trustedAdminNames: string[];
@@ -94,8 +92,6 @@ export function loadConfig(): Config {
     maxMessageBytes: parseIntEnv('MAX_MESSAGE_BYTES', 16384),
     lensDbPath: process.env.LENS_DB_PATH ?? './data/lens.db',
     lanCidrs,
-    unifiMcpServerUrl: process.env.UNIFI_MCP_SERVER_URL?.trim() || null,
-    unifiMcpServerToken: process.env.UNIFI_MCP_SERVER_TOKEN?.trim() || null,
     logLevel: rawLogLevel as LogLevel,
     mcpSecret: process.env.MCP_SECRET,
     trustedAdminNames: parseCommaList(process.env.TRUSTED_ADMIN_NAMES),

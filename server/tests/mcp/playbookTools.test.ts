@@ -21,7 +21,7 @@ async function connect(lensDb: LensDb) {
     {
       lensDb,
       eventsDb: null,
-      unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
+      enricher: { resolveClient: async () => null, getFirewallSummary: async () => null },
       homelabServices: {},
     },
     { trustedAdminNames: [] }
