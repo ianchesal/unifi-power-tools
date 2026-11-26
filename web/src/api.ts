@@ -94,8 +94,12 @@ export async function logout(): Promise<void> {
   });
 }
 
+// true signed in, false signed out (401). Anything else (e.g. 429 rate
+// limited, 5xx) throws: it says nothing about the session.
 export async function checkSession(): Promise<boolean> {
   const res = await fetch('/api/auth/session');
-  return res.ok;
+  if (res.ok) return true;
+  if (res.status === 401) return false;
+  throw new ApiError(`session check returned ${res.status}`, res.status);
 }
 

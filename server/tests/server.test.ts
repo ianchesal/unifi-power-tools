@@ -21,7 +21,8 @@ describe('createApp /health', () => {
       baseConfig
     );
     const res = await request(app).get('/health');
-    expect(res.status).toBe(200);
+    // 503 so the Docker healthcheck (wget, exit code only) marks it unhealthy.
+    expect(res.status).toBe(503);
     expect(res.body).toMatchObject({
       status: 'degraded',
       syslog: { bound: false, droppedMessages: 3 },
@@ -35,6 +36,7 @@ describe('createApp /health', () => {
     const res = await request(createApp(deps({ eventsDb: opened.reader }), baseConfig)).get(
       '/health'
     );
+    expect(res.status).toBe(503);
     expect(res.body).toMatchObject({ status: 'degraded', eventsDb: 'error' });
   });
 });

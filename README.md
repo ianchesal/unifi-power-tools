@@ -39,7 +39,7 @@ MCP_SECRET=<a strong random secret>
 DASHBOARD_PASSWORD=<a different password>
 LAN_CIDRS=10.0.0.0/8,192.168.0.0/16,172.16.0.0/12
 # Optional: enables the UniFi tools and client-name enrichment
-UNIFI_HOST=https://<gateway-ip>
+UNIFI_HOST=<gateway-ip>
 UNIFI_API_KEY=<UniFi Network API key>
 ```
 
@@ -476,7 +476,7 @@ invoke it directly as `/server:analyzing-findings`.
 | Dashboard (`/`) | Triage KPI tiles (needs attention, AI queue, closed in 7 days, 24h events), a queue strip (with a button that copies the `/mcp__unifi-power-tools__triage` command), events-over-time / top signatures / top source IPs / severity charts, and two findings views: **Needs attention** (default; each card says what to do in UniFi and why, with the finding's history, and offers Handled / Not a concern; a card with no current AI recommendation, such as one you reopened, also offers Re-analyze) and **Closed** (searchable, filterable by who closed it: rule, AI, human, system; each row has its history and offers **This was wrong** (reopen, with a note) or Re-analyze). A verdict that cited playbook entries shows them as **Relied on**, linked to the Playbook page. The header's **Playbook** link shows how many proposals are pending. |
 | Playbook (`/playbook`) | The site knowledge triage relies on: pending proposals, entries, the change log and your homelab registry (see [Playbook](#playbook)). |
 | Admin (`/admin`) | One-off maintenance actions — currently just the rule-triage backfill (see [Rule-based auto-triage](#rule-based-auto-triage)). |
-| `GET /health` | Liveness, no network calls: `{ status, syslog: { bound, droppedMessages }, eventsDb }`. Open (no sign-in). |
+| `GET /health` | Liveness, no network calls: `{ status, syslog: { bound, droppedMessages }, eventsDb }`; 503 when degraded (syslog not bound or the events DB failing), so the Docker healthcheck flags it. Open (no sign-in). |
 | `GET /ready` | `/health` plus UniFi reachability (`unifi: ok \| unavailable \| not_configured`); 503 only if syslog isn't bound or the events DB fails. Open. |
 | `POST /api/auth/login` | Sign in: `{ password }`. Sets the session cookie; 401 for a wrong password, 429 after 10 failed attempts in 15 minutes. |
 | `POST /api/auth/logout`, `GET /api/auth/session` | Sign out; check whether the cookie is still valid. |
@@ -531,7 +531,7 @@ every `POST`/`PUT` there must send `Content-Type: application/json` (a body of
 | `SYSLOG_BIND_ADDRESS` | no | `0.0.0.0` | Bind address for syslog |
 | `MAX_MESSAGE_BYTES` | no | `16384` | Larger datagrams are dropped and counted in `/health` |
 | `RETENTION_DAYS` | no | `90` | Events older than this are purged hourly |
-| `UNIFI_HOST`, `UNIFI_API_KEY` | no | *(unset)* | UniFi Network controller URL and API key. Set both or neither (one alone fails startup). Both set: UniFi read tools on `/mcp`, client-name and firewall-summary enrichment of analysis context, and `/ready` checks the controller |
+| `UNIFI_HOST`, `UNIFI_API_KEY` | no | *(unset)* | UniFi gateway IP or hostname (a leading `https://` is stripped) and API key. Set both or neither (one alone fails startup). Both set: UniFi read tools on `/mcp`, client-name and firewall-summary enrichment of analysis context, and `/ready` checks the controller |
 | `UNIFI_SITE` | no | `default` | UniFi site |
 | `UNIFI_VERIFY_TLS` | no | `false` | Verify the controller's TLS certificate (`true` to enable) |
 | `UNIFI_REQUEST_TIMEOUT_MS` | no | `10000` | Per-request timeout for UniFi API calls |

@@ -139,13 +139,24 @@ describe('loadConfig', () => {
       process.env.UNIFI_HOST = 'https://unifi.example';
       process.env.UNIFI_API_KEY = 'key';
       expect(loadConfig().unifi).toEqual({
-        host: 'https://unifi.example',
+        host: 'unifi.example',
         apiKey: 'key',
         site: 'default',
         verifyTls: false,
         timeoutMs: 10000,
         allowWrites: false,
       });
+    });
+
+    it.each([
+      ['https://192.0.2.1', '192.0.2.1'],
+      ['http://192.0.2.1/', '192.0.2.1'],
+      ['HTTPS://unifi.example:8443/', 'unifi.example:8443'],
+      ['192.0.2.1', '192.0.2.1'],
+    ])('normalises UNIFI_HOST %s to the bare host %s', (given, host) => {
+      process.env.UNIFI_HOST = given;
+      process.env.UNIFI_API_KEY = 'key';
+      expect(loadConfig().unifi?.host).toBe(host);
     });
 
     it('enables writes only for the literal "true"', () => {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { checkSession, fetchJson, logout, onUnauthorized } from './api';
+import { ApiError, checkSession, fetchJson, logout, onUnauthorized } from './api';
 import { AdminPage } from './components/AdminPage';
 import { EventsOverTimeChart } from './components/EventsOverTimeChart';
 import { FindingsSection } from './components/FindingsSection';
@@ -28,6 +28,8 @@ const RANGES = [
 export default function App() {
   // null while the session check is in flight.
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  // Set when the session check failed for a reason other than "signed out".
+  const [checkError, setCheckError] = useState<string | null>(null);
 
   useEffect(() => {
     // Any API call that comes back 401 (e.g. the cookie expired mid-use)
@@ -35,9 +37,25 @@ export default function App() {
     onUnauthorized(() => setSignedIn(false));
     checkSession()
       .then(setSignedIn)
-      .catch(() => setSignedIn(false));
+      .catch((err) => {
+        const status = err instanceof ApiError ? err.status : 0;
+        setCheckError(
+          status === 429
+            ? 'Too many requests right now. Wait a few minutes, then reload.'
+            : 'Could not reach the server. Reload to try again.'
+        );
+      });
   }, []);
 
+  if (checkError) {
+    return (
+      <div className="login-wrap">
+        <div className="login-card">
+          <p className="login-error">{checkError}</p>
+        </div>
+      </div>
+    );
+  }
   if (signedIn === null) return null;
   if (!signedIn) return <LoginPage onSignedIn={() => setSignedIn(true)} />;
 
@@ -69,7 +87,12 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
   }, [refreshKey]);
 
   useEffect(() => {
-    fetchJson<Health>('/health').then(setHealth).catch(() => setHealth(null));
+    // /health answers 503 with the same body when degraded, so read the body
+    // either way rather than going through fetchJson.
+    fetch('/health')
+      .then((r) => r.json() as Promise<Health>)
+      .then(setHealth)
+      .catch(() => setHealth(null));
     // Fetched once per refresh for both the KPI tile and the queue strip; a
     // failed refresh keeps the last good value rather than hiding the strip.
     fetchJson<QueueStats>('/api/queue')

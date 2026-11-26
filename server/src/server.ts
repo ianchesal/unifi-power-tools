@@ -41,10 +41,22 @@ export function createApp(deps: AppDeps, config: Config) {
       /^\d+$/.test(config.trustProxy) ? Number(config.trustProxy) : config.trustProxy
     );
   }
+  // Separate budgets: a triage run makes 100+ /mcp calls, which must not lock
+  // the dashboard out (or vice versa). Static assets aren't counted at all.
   app.use(
+    ['/api', '/ready'],
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 300,
+      limit: 300,
+      standardHeaders: true,
+      legacyHeaders: false,
+    })
+  );
+  app.use(
+    '/mcp',
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      limit: 3000,
       standardHeaders: true,
       legacyHeaders: false,
     })
@@ -80,8 +92,11 @@ export function createApp(deps: AppDeps, config: Config) {
     };
   };
 
+  // 503 when degraded: the Docker healthcheck only looks at the exit code, and
+  // ingest stopping is the one failure that can't be recovered afterwards.
   app.get('/health', (_req, res) => {
-    res.json(coreStatus());
+    const core = coreStatus();
+    res.status(core.status === 'ok' ? 200 : 503).json(core);
   });
 
   // Readiness: adds UniFi reachability. UniFi being down doesn't make the

@@ -115,4 +115,15 @@ describe('dashboard auth', () => {
       .send({ password: TEST_PASSWORD });
     expect(String(res.headers['set-cookie'])).not.toMatch(/Secure/);
   });
+
+  it('/mcp traffic does not use up the dashboard rate-limit budget', async () => {
+    const a = app();
+    for (let i = 0; i < 301; i++) {
+      const res = await request(a).post('/mcp').set('Authorization', 'Bearer wrong').send({});
+      expect(res.status).toBe(401);
+    }
+    expect((await request(a).get('/api/auth/session')).status).toBe(401);
+    expect((await (await loginAgent(a)).get('/api/findings')).status).toBe(200);
+  });
 });
+

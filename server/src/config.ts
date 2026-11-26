@@ -41,7 +41,12 @@ export interface UnifiConfig {
 }
 
 function loadUnifiConfig(): UnifiConfig | null {
-  const host = process.env.UNIFI_HOST?.trim() ?? '';
+  // The client builds https://<host>/proxy/..., so accept a pasted URL and keep
+  // only the host (and port).
+  const host = (process.env.UNIFI_HOST ?? '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
   const apiKey = process.env.UNIFI_API_KEY?.trim() ?? '';
   if (!host && !apiKey) return null;
   if (!host || !apiKey) throw new Error('UNIFI_HOST and UNIFI_API_KEY must be set together');
