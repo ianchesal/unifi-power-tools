@@ -7,17 +7,17 @@ import type { EventsDb } from '../../src/db/eventsDb.js';
 import { assemblePlaybook } from '../../src/mcp/playbook/assemble.js';
 import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
-import { createLensMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
+import { createMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
 import { seededEventsDb } from '../helpers.js';
 
 async function connect({
-  eventsDb,
+  eventsDb = seededEventsDb([]),
   lensDb = openLensDb(':memory:'),
 }: {
-  eventsDb: EventsDb | null;
+  eventsDb?: EventsDb;
   lensDb?: LensDb;
 }) {
-  const server = createLensMcpServer({
+  const server = createMcpServer({
     lensDb,
     eventsDb,
     unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
@@ -29,7 +29,23 @@ async function connect({
   return client;
 }
 
-describe('lens MCP server', () => {
+describe('MCP server', () => {
+  it('lists the event tools: list_events, get_event, get_categories, get_event_stats', async () => {
+    const names = (await (await connect({})).listTools()).tools.map((t) => t.name);
+    for (const n of ['list_events', 'get_event', 'get_categories', 'get_event_stats']) {
+      expect(names).toContain(n);
+    }
+  });
+
+  it('has no duplicate tool names', async () => {
+    const names = (await (await connect({})).listTools()).tools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('identifies itself as unifi-power-tools', async () => {
+    expect((await connect({})).getServerVersion()?.name).toBe('unifi-power-tools');
+  });
+
   it('serves instructions that point at the triage prompt and get_playbook', async () => {
     const client = await connect({ eventsDb: seededEventsDb([]) });
     const text = client.getInstructions();
@@ -63,8 +79,8 @@ describe('lens MCP server', () => {
     expect(res.content[0].text).toMatch(/## Configured trusted admins[\s\S]*- alice/);
   });
 
-  it('still serves the playbook with no sink DB (degraded mode)', async () => {
-    const client = await connect({ eventsDb: null });
+  it('serves instructions and the triage prompt from an empty events DB', async () => {
+    const client = await connect({});
     expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
     expect((await client.getPrompt({ name: 'triage' })).messages).toHaveLength(1);
   });
@@ -103,7 +119,7 @@ describe('lens MCP server', () => {
       { op: 'edit', entry_id: second.id, title: 'Mine', body: 'my text' },
       '2026-01-02T00:00:00.000Z'
     );
-    const text = await playbookText(await connect({ eventsDb: null, lensDb }));
+    const text = await playbookText(await connect({ lensDb }));
     expect(text).toContain(`### [${first.id}] ${first.title} (default)\n\n`);
     expect(text).toContain(`### [${second.id}] Mine\n\n`);
   });

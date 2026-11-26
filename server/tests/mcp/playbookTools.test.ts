@@ -14,10 +14,10 @@ import { addHistory, type HistoryKind } from '../../src/db/findingHistoryStore.j
 import { updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import { humanChange, listEntries, listProposals } from '../../src/db/playbookStore.js';
-import { createLensMcpServer } from '../../src/mcp/server.js';
+import { createMcpServer } from '../../src/mcp/server.js';
 
 async function connect(lensDb: LensDb) {
-  const server = createLensMcpServer(
+  const server = createMcpServer(
     {
       lensDb,
       eventsDb: null,

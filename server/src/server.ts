@@ -15,7 +15,7 @@ import type { LensDb } from './db/lensDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
 import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
 import type { SyslogListener } from './ingest/listener.js';
-import { createLensMcpServer } from './mcp/server.js';
+import { createMcpServer } from './mcp/server.js';
 
 export interface AppDeps {
   eventsDb: EventsDb;
@@ -80,7 +80,7 @@ export function createApp(deps: AppDeps, config: Config) {
   });
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
-    const mcpServer = createLensMcpServer(
+    const mcpServer = createMcpServer(
       { lensDb, eventsDb, unifiMcp, homelabServices },
       { trustedAdminNames: config.trustedAdminNames }
     );
