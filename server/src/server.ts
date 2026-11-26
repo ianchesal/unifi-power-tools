@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -14,7 +13,7 @@ import type { LensDb } from './db/lensDb.js';
 import type { SinkDb } from './db/sinkDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
 import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
-import { registerAnalysisTools } from './mcp/tools.js';
+import { createLensMcpServer } from './mcp/server.js';
 
 export interface SchemaCheckResult {
   ok: boolean;
@@ -93,8 +92,7 @@ export function createApp(
   });
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
-    const mcpServer = new McpServer({ name: 'unifi-siem-lens', version: '0.1.0' });
-    registerAnalysisTools(mcpServer, { lensDb, sinkDb, unifiMcp, homelabServices });
+    const mcpServer = createLensMcpServer({ lensDb, sinkDb, unifiMcp, homelabServices });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => {
       transport.close();
