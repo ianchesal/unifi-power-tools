@@ -172,7 +172,8 @@ const MIGRATIONS: { version: number; sql: string }[] = [
         proposed_by TEXT NOT NULL CHECK (proposed_by IN ('ai', 'human', 'default')),
         created_at TEXT NOT NULL,
         decided_at TEXT,
-        decision_note TEXT
+        decision_note TEXT,
+        edited_on_accept INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE playbook_defaults_seen (
         default_key TEXT PRIMARY KEY,

@@ -38,6 +38,8 @@ export interface PlaybookProposal {
   created_at: string;
   decided_at: string | null;
   decision_note: string | null;
+  // 1 when the operator changed the proposed text while accepting it.
+  edited_on_accept: number;
 }
 
 export class ProposalError extends Error {
@@ -73,17 +75,19 @@ export function activeEntryIds(db: LensDb): Set<number> {
 }
 
 // Active entries whose current text is not a shipped default: the latest accepted
-// change to each came from the operator, or from an AI proposal they approved.
-// An add proposal has no entry_id, so the entry's source_proposal_id links it.
+// change to each came from the operator, from an AI proposal they approved, or
+// from a default update whose text they edited while accepting it. An add
+// proposal has no entry_id, so the entry's source_proposal_id links it.
 export function operatorBackedEntryIds(db: LensDb): Set<number> {
   const rows = db.conn
     .prepare(
       `SELECT e.id FROM playbook_entries e
        WHERE e.status = 'active' AND (
-         SELECT p.proposed_by FROM playbook_proposals p
+         SELECT p.proposed_by != 'default' OR p.edited_on_accept = 1
+         FROM playbook_proposals p
          WHERE p.status = 'accepted' AND (p.entry_id = e.id OR p.id = e.source_proposal_id)
          ORDER BY p.decided_at DESC, p.id DESC LIMIT 1
-       ) != 'default'`
+       )`
     )
     .all() as { id: number }[];
   return new Set(rows.map((r) => r.id));
@@ -125,10 +129,12 @@ export function createProposal(
 ): PlaybookProposal {
   const entryId = p.entry_id ?? null;
   assertText(p.op, p.title, p.body);
-  if (p.op !== 'add') targetEntry(db, p.op, entryId);
-  else if (entryId !== null) {
+  if (p.op === 'add' && entryId !== null) {
     throw new ProposalError('invalid', 'add must not name an entry_id');
   }
+  const target = p.op === 'add' ? null : targetEntry(db, p.op, entryId);
+  // A retire records what is being retired, whatever text the caller sent.
+  const { title, body } = p.op === 'retire' && target ? target : p;
   const row = db.conn
     .prepare(
       `INSERT INTO playbook_proposals
@@ -138,8 +144,8 @@ export function createProposal(
     .get(
       p.op,
       entryId,
-      p.title,
-      p.body,
+      title,
+      body,
       p.rationale,
       JSON.stringify(p.evidence),
       p.proposed_by,
@@ -197,6 +203,7 @@ function applyToEntries(db: LensDb, p: PlaybookProposal, nowIso: string): Playbo
 }
 
 // `edits` override the proposal's text; the proposal row keeps what was applied.
+// A retire takes no edits: it records the entry's text as it is now.
 export function acceptProposal(
   db: LensDb,
   id: number,
@@ -205,19 +212,22 @@ export function acceptProposal(
 ): { proposal: PlaybookProposal; entry: PlaybookEntry } {
   return atomically(db, () => {
     const pending = pendingProposal(db, id);
-    const applied = {
-      ...pending,
-      title: edits?.title ?? pending.title,
-      body: edits?.body ?? pending.body,
-    };
+    const text =
+      pending.op === 'retire'
+        ? targetEntry(db, pending.op, pending.entry_id)
+        : { title: edits?.title ?? pending.title, body: edits?.body ?? pending.body };
+    const applied = { ...pending, title: text.title, body: text.body };
+    const edited =
+      pending.op !== 'retire' && (applied.title !== pending.title || applied.body !== pending.body);
     assertText(applied.op, applied.title, applied.body);
     const entry = applyToEntries(db, applied, nowIso);
     const row = db.conn
       .prepare(
-        `UPDATE playbook_proposals SET status = 'accepted', title = ?, body = ?, decided_at = ?
+        `UPDATE playbook_proposals
+         SET status = 'accepted', title = ?, body = ?, edited_on_accept = ?, decided_at = ?
          WHERE id = ? RETURNING *`
       )
-      .get(applied.title, applied.body, nowIso, id);
+      .get(applied.title, applied.body, edited ? 1 : 0, nowIso, id);
     return { proposal: toProposal(row as unknown as ProposalRow), entry };
   });
 }
@@ -253,15 +263,13 @@ export function humanChange(
   nowIso: string
 ): { proposal: PlaybookProposal; entry: PlaybookEntry } {
   return atomically(db, () => {
-    // A retire needs no text from the caller: record what is being retired.
-    const current = p.op === 'retire' ? targetEntry(db, p.op, p.entry_id ?? null) : null;
     const created = createProposal(
       db,
       {
         op: p.op,
         entry_id: p.entry_id,
-        title: p.title ?? current?.title ?? '',
-        body: p.body ?? current?.body ?? '',
+        title: p.title ?? '',
+        body: p.body ?? '',
         rationale: p.rationale ?? '',
         evidence: { finding_ids: [], history_ids: [] },
         proposed_by: 'human',

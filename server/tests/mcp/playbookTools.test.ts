@@ -269,6 +269,20 @@ describe('proposal tools', () => {
     expect(listProposals(db)).toEqual([]);
   });
 
+  it("a retire with blank title and body stores the entry's text", async () => {
+    const db = openLensDb(':memory:');
+    const { entry } = humanChange(db, { op: 'add', title: 'T', body: 'B' }, 't0');
+    const created = await json(await connect(db), 'propose_playbook_change', {
+      ...proposal,
+      op: 'retire',
+      entry_id: entry.id,
+      title: '',
+      body: '',
+    });
+    expect(created).toMatchObject({ op: 'retire', title: 'T', body: 'B', status: 'pending' });
+    expect(listEntries(db)).toEqual([entry]);
+  });
+
   it('a blank rationale is a tool error', async () => {
     const db = openLensDb(':memory:');
     const res = await call(await connect(db), 'propose_playbook_change', {

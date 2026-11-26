@@ -204,7 +204,9 @@ names.
   note.
 - **Active entries:** **Add entry**, **Edit** or **Retire**. Retired entries sit
   in a collapsed group; editing one reactivates it.
-- **Change log:** every accepted and rejected proposal.
+- **Change log:** every accepted and rejected proposal, with the id of the entry
+  it changed (an add shows none). A retire records the retired entry's own text,
+  whatever the proposal said.
 - **Homelab registry:** your
   [homelab services file](#homelablocal-service-enrichment), read-only.
 
@@ -300,9 +302,10 @@ Findings from before this model are migrated by lens.db migration 4.
 
 An entry you stand behind is an active one that you wrote or edited, or that
 came from a Claude proposal you accepted. Shipped default text alone doesn't
-count. Accepting a default's update proposal leaves it a default, even if you
-changed the text while accepting; saving the entry from the Playbook page makes
-it yours. The server checks who stands behind a cited entry, not whether it
+count. Accepting a default's update proposal as proposed makes or leaves the
+entry a default, even if you had edited it before; **Edit & accept** with your
+own changes, or saving the entry from the Playbook page, makes it yours. The
+server checks who stands behind a cited entry, not whether it
 covers the traffic: applying entries literally is the playbook's rule. When
 every IPS alert was blocked, a `close` needs no citation.
 

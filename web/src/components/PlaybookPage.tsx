@@ -206,6 +206,12 @@ function ProposalCard({ proposal, ...actions }: { proposal: PlaybookProposal } &
       </div>
       {proposal.rationale && <p className="analysis-body">{proposal.rationale}</p>}
       <ProposalChange proposal={proposal} />
+      {proposal.proposed_by === 'default' && (
+        <p className="muted-line">
+          Accept keeps this as shipped default text, which can't by itself justify closing unblocked traffic. Edit &amp;
+          accept with your own changes makes it yours.
+        </p>
+      )}
       {evidence.length > 0 && (
         <div className="evidence-list">
           <span className="diff-label">Evidence</span>
@@ -372,7 +378,8 @@ function ChangeLog({ decided }: { decided: PlaybookProposal[] }) {
           {p.decided_at ? <Timestamp iso={p.decided_at} /> : <span />}
           <span className={`change-status ${p.status}`}>{p.status}</span>
           <span className="analysis-source">
-            {OP_LABELS[p.op]} · by {PROPOSER_LABELS[p.proposed_by]}
+            {OP_LABELS[p.op]}
+            {p.entry_id !== null && ` #${p.entry_id}`} · by {PROPOSER_LABELS[p.proposed_by]}
           </span>
           <span className="history-summary">
             {p.title}

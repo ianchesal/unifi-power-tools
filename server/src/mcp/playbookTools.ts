@@ -62,7 +62,7 @@ export function registerPlaybookTools(server: McpServer, lensDb: LensDb): void {
 
   server.tool(
     'propose_playbook_change',
-    'Propose adding, editing or retiring a site-knowledge entry. It stays pending until the operator accepts it on the dashboard. edit and retire need entry_id; for retire, repeat the current title and body of the entry.',
+    "Propose adding, editing or retiring a site-knowledge entry. It stays pending until the operator accepts it on the dashboard. edit and retire need entry_id; a retire ignores title and body (send empty strings) and records the entry's current text.",
     {
       op: z.enum(['add', 'edit', 'retire']),
       entry_id: z.number().int().optional(),

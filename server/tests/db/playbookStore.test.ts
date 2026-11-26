@@ -263,6 +263,39 @@ describe('playbookStore', () => {
     db.close();
   });
 
+  it("a retire proposal records the entry's text, not the caller's", () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    for (const text of [
+      { title: 'Another entry', body: 'something else' },
+      { title: '', body: '' },
+    ]) {
+      const created = createProposal(
+        db,
+        { ...addInput(), ...text, op: 'retire', entry_id: seeded.id },
+        T1
+      );
+      expect(created).toMatchObject({ title: 'Seed', body: 'seed body' });
+    }
+    db.close();
+  });
+
+  it("accepting a retire re-copies the entry's current text", () => {
+    const db = openLensDb(':memory:');
+    const seeded = seedEntry(db);
+    const created = createProposal(db, { ...addInput(), op: 'retire', entry_id: seeded.id }, T1);
+    humanChange(db, { op: 'edit', entry_id: seeded.id, title: 'Now', body: 'current body' }, T1);
+    const { proposal, entry } = acceptProposal(
+      db,
+      created.id,
+      { title: 'caller title', body: '' },
+      T2
+    );
+    expect(proposal).toMatchObject({ title: 'Now', body: 'current body', edited_on_accept: 0 });
+    expect(entry).toMatchObject({ title: 'Now', body: 'current body', status: 'retired' });
+    db.close();
+  });
+
   it('retire removes the id from activeEntryIds', () => {
     const db = openLensDb(':memory:');
     const seeded = seedEntry(db);
@@ -340,6 +373,48 @@ describe('operatorBackedEntryIds', () => {
 
     rejectProposal(db, edit(db, id, 'default', T2).id, null, T2);
     expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+    db.close();
+  });
+
+  it('a default update accepted with edited text makes the entry operator-backed', () => {
+    for (const edits of [{ title: 'My title' }, { body: 'my host' }]) {
+      const db = openLensDb(':memory:');
+      const { id } = defaultEntry(db);
+      const update = edit(db, id, 'default', T1);
+      const { proposal } = acceptProposal(db, update.id, edits, T2);
+      expect(proposal).toMatchObject({ proposed_by: 'default', edited_on_accept: 1 });
+      expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+      db.close();
+    }
+  });
+
+  it('a default update accepted as proposed leaves it default', () => {
+    const db = openLensDb(':memory:');
+    const { id } = defaultEntry(db);
+    const first = acceptProposal(db, edit(db, id, 'default', T0).id, null, T0);
+    expect(first.proposal.edited_on_accept).toBe(0);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(false);
+
+    // An entry the operator edited, then a default bump accepted as proposed.
+    humanChange(db, { op: 'edit', entry_id: id, title: 'Mine', body: 'my host' }, T1);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(true);
+    acceptProposal(db, edit(db, id, 'default', T2).id, null, T2);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(false);
+    db.close();
+  });
+
+  it("edits identical to the proposal don't count", () => {
+    const db = openLensDb(':memory:');
+    const { id } = defaultEntry(db);
+    const update = edit(db, id, 'default', T1);
+    const { proposal } = acceptProposal(
+      db,
+      update.id,
+      { title: update.title, body: update.body },
+      T2
+    );
+    expect(proposal.edited_on_accept).toBe(0);
+    expect(operatorBackedEntryIds(db).has(id)).toBe(false);
     db.close();
   });
 

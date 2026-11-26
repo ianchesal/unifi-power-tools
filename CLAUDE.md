@@ -207,14 +207,17 @@ Operator-approved entries about this network, learned through proposals.
 - **One writer, every change a proposal.** `db/playbookStore.ts` is the only code
   that writes `playbook_entries` and `playbook_proposals`. An entry's text and
   status change only when a proposal is accepted (`add`, `edit`, `retire`;
-  nothing is deleted, and an edit reactivates a retired entry). `humanChange` records a dashboard change
+  nothing is deleted, and an edit reactivates a retired entry). The store owns a retire's
+  text: it copies the entry's title and body at creation and again at accept,
+  ignoring the caller's text and edits. `humanChange` records a dashboard change
   as a proposal and accepts it at once, so the proposal table is the change log.
   MCP can only create pending `ai` proposals; accepting and rejecting happen only
   over REST (`api/playbook.ts`), where every write requires a JSON body so a
   cross-site request can't make one.
 - **Operator-backed** (`operatorBackedEntryIds`): active entries whose latest
-  accepted proposal isn't `proposed_by: 'default'`. This follows the proposer, so
-  a default update accepted with edited text stays default. Shipped default text
+  accepted proposal isn't `proposed_by: 'default'`, or has `edited_on_accept`
+  (the accepted title or body differs from what was proposed). So a default
+  update accepted as proposed makes or leaves the entry a default. Shipped default text
   can't by itself justify closing unblocked traffic; the playbook marks it
   ` (default)`. The API's `is_default` is the negation, so it is also true for
   every retired entry: only label active ones. The check covers who stands behind
