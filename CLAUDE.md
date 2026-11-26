@@ -160,6 +160,16 @@ with `is_recheck` set, and the verdict must then supply `why_now`.
 
 ### MCP handoff (`server/src/mcp/`, `server/src/db/analysisRequestsStore.ts`)
 
+`mcp/server.ts`'s `createLensMcpServer` builds the per-request `McpServer`
+(stateless transport, one per `/mcp` request) with `instructions` pointing at
+the playbook, the analysis tools below, the `triage` prompt
+(`/mcp__unifi-siem-lens__triage`) and the `get_playbook` tool. Both serve
+`assemblePlaybook()` (`mcp/playbook/`): the code-owned core (`core.ts`) plus a
+site-knowledge section, which stays empty until phase C adds `playbook_entries`.
+The core is public, so it must stay generic: no real addresses, hostnames,
+port forwards or VPN endpoints. A test rejects IPv4 literals outside RFC 5737,
+and another fails if the playbook names a lens tool that isn't registered.
+
 There is no "Analyze this" click: the pipeline queues an `analysis_requests`
 row (`queueForAnalysis`, at most one `pending` per finding) for every finding
 the rules don't close, including client findings, and for rechecks
