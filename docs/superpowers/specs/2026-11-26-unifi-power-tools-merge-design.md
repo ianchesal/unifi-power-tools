@@ -243,14 +243,14 @@ UniFi client in and auth landing.**
 - `DASHBOARD_PASSWORD` env var, **required** (startup fails without it, like
   `MCP_SECRET`). It must differ from `MCP_SECRET`; startup fails if equal.
 - `POST /api/auth/login` with JSON `{ password }`: constant-time comparison
-  (`crypto.timingSafeEqual` over SHA-256 digests, so lengths match). Success
+  (`crypto.timingSafeEqual` over both inputs padded to equal length, lengths compared separately; no hashing, which CodeQL flags as weak password hashing). Success
   sets a session cookie; failure is a 401 with no detail. A dedicated rate
   limit on this route (e.g. 10 attempts per 15 minutes per IP) on top of the
   global limiter.
 - Session cookie: `HttpOnly`, `SameSite=Strict`, `Path=/`, a 30-day expiry,
   `Secure` when `req.secure` is true. Value is a stateless signed token
   (expiry + HMAC-SHA256). The HMAC key is
-  `HMAC(sessionSecret, SHA-256(DASHBOARD_PASSWORD))`, where `sessionSecret`
+  `scrypt(DASHBOARD_PASSWORD, sessionSecret)` (originally HMAC over SHA-256; changed to scrypt after CodeQL review so lens.db plus a cookie can't be brute-forced at hash speed), where `sessionSecret`
   is 32 random bytes generated on first boot and stored in `lens.db` (a new
   migration adding a small `meta` key/value table). Sessions survive
   restarts, changing the password logs everyone out, and a captured cookie
@@ -269,8 +269,8 @@ UniFi client in and auth landing.**
   200/401 so the SPA can decide what to render.
 - An auth middleware guards **all of `/api/*`** except `/api/auth/*`.
   `/mcp` keeps its bearer check and ignores cookies. The bearer comparison
-  moves to the same constant-time helper as the password (SHA-256 both
-  sides, `timingSafeEqual`); with `UNIFI_ALLOW_WRITES=true` that secret
+  moves to the same constant-time helper as the password (padded
+  `timingSafeEqual`); with `UNIFI_ALLOW_WRITES=true` that secret
   gates firewall changes. `/health` stays open
   (Docker healthcheck) and reveals only status fields, no data. `/ready` is
   open too and reports component state only. The static SPA bundle is served

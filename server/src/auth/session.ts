@@ -1,14 +1,15 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import type { LensDb } from '../db/lensDb.js';
 
 // Dashboard sessions: a stateless signed cookie, `<expiryMs>.<base64url HMAC>`.
 //
-// The HMAC key is HMAC(sessionSecret, SHA-256(password)). sessionSecret is 32
-// random bytes made on first boot and kept in lens.db, so:
+// The HMAC key is scrypt(password, sessionSecret). sessionSecret is 32 random
+// bytes made on first boot and kept in lens.db, so:
 // - sessions survive restarts (same secret, same password -> same key);
 // - changing DASHBOARD_PASSWORD logs everyone out (new key);
 // - a captured cookie can't be used to guess the password offline, because
-//   the key isn't derivable from the password alone.
+//   the key isn't derivable from the password alone, and even with lens.db
+//   each guess costs an scrypt.
 
 export const SESSION_COOKIE = 'upt_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -30,10 +31,13 @@ export function getOrCreateSessionSecret(db: LensDb): Buffer {
   return Buffer.from(stored.value, 'hex');
 }
 
+// scrypt (Node's default cost, N=2^14): computed once per process start, and
+// slow enough that someone holding lens.db and a cookie can't test password
+// guesses at hash speed.
+export const SESSION_KEY_SCRYPT = { N: 16384, r: 8, p: 1 } as const;
+
 export function sessionKey(secret: Buffer, password: string): Buffer {
-  return createHmac('sha256', secret)
-    .update(createHash('sha256').update(password).digest())
-    .digest();
+  return scryptSync(password, secret, 32, SESSION_KEY_SCRYPT);
 }
 
 function mac(key: Buffer, expiryMs: string): Buffer {

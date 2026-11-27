@@ -1,3 +1,4 @@
+import { scryptSync } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -5,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   getOrCreateSessionSecret,
   issueToken,
+  SESSION_KEY_SCRYPT,
   SESSION_TTL_MS,
   sessionKey,
   verifyToken,
@@ -14,6 +16,12 @@ import { openLensDb } from '../../src/db/lensDb.js';
 const NOW = new Date('2026-11-26T12:00:00.000Z');
 const secret = Buffer.alloc(32, 7);
 const key = sessionKey(secret, 'hunter2');
+
+describe('sessionKey', () => {
+  it('is derived with scrypt, so lens.db plus a cookie can\'t be brute-forced at hash speed', () => {
+    expect(key.equals(scryptSync('hunter2', secret, 32, SESSION_KEY_SCRYPT))).toBe(true);
+  });
+});
 
 describe('issueToken / verifyToken', () => {
   it('round-trips a fresh token', () => {

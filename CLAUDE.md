@@ -341,7 +341,7 @@ Auth (`server/src/auth/`, `server/src/api/auth.ts`):
 - **Dashboard/REST:** `POST /api/auth/login` checks `DASHBOARD_PASSWORD`
   (constant time) and sets `upt_session`, a stateless signed cookie
   (`<expiryMs>.<HMAC>`, 30 days, `HttpOnly`, `SameSite=Strict`, `Secure` when
-  `req.secure`). The HMAC key is `HMAC(sessionSecret, SHA-256(password))`
+  `req.secure`). The HMAC key is `scrypt(password, sessionSecret)`
   with `sessionSecret` 32 random bytes in `lens.db`'s `meta` table: sessions
   survive restarts, a password change logs everyone out, and a captured cookie
   can't be used to guess the password offline. Everything under `/api` except
