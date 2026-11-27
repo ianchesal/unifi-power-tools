@@ -1,8 +1,11 @@
 {
   "mcpServers": {
-    "unifi-siem-lens": {
+    "unifi-power-tools": {
       "type": "http",
-      "url": "http://localhost:3002/mcp"
+      "url": "http://localhost:3002/mcp",
+      "headers": {
+        "Authorization": "Bearer ${UNIFI_POWER_TOOLS_MCP_SECRET}"
+      }
     }
   }
 }

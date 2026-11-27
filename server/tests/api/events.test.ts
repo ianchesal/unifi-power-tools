@@ -1,11 +1,12 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { openSinkDb } from '../../src/db/sinkDb.js';
+import { DatabaseSync } from 'node:sqlite';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import { createEventsRouter } from '../../src/api/events.js';
 
 describe('GET /api/events and /api/stats/*', () => {
-  const db = openSinkDb('tests/fixtures/events.db');
+  const db: EventsDb = { conn: new DatabaseSync('tests/fixtures/events.db', { readOnly: true }) };
   const app = express();
   app.use('/api', createEventsRouter(db));
 

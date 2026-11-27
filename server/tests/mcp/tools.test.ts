@@ -9,11 +9,11 @@ import { getAnalysisRequest } from '../../src/db/analysisRequestsStore.js';
 import { getFindingById, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import { humanChange, listEntries } from '../../src/db/playbookStore.js';
-import type { SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
 import { registerAnalysisTools } from '../../src/mcp/tools.js';
-import { seededSinkDb } from '../helpers.js';
+import { seededEventsDb } from '../helpers.js';
 
 const IP = '198.51.100.4';
 const MAC = 'aa:aa:aa:aa:aa:01';
@@ -21,12 +21,12 @@ const MAC = 'aa:aa:aa:aa:aa:01';
 const FIRST_SEEN = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const RECENT = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-async function connectedClient(lensDb: LensDb, sinkDb: SinkDb | null) {
+async function connectedClient(lensDb: LensDb, eventsDb: EventsDb = seededEventsDb([])) {
   const server = new McpServer({ name: 'test', version: '0.1.0' });
   registerAnalysisTools(server, {
     lensDb,
-    sinkDb,
-    unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
+    eventsDb,
+    enricher: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -54,11 +54,11 @@ const close = { verdict: 'close', risk_level: 'low', summary: 'benign', reasonin
 describe('MCP analysis tools', () => {
   it('get_pending_analyses → get_analysis_context → submit_analysis closes the finding', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: RECENT, category: 'ips_alert', signature: 'S', source_ip: IP, action: 'blocked' },
     ]);
     const { finding, request } = queued(lensDb);
-    const client = await connectedClient(lensDb, sinkDb);
+    const client = await connectedClient(lensDb, eventsDb);
 
     const pending = await call(client, 'get_pending_analyses', {});
     const rows = JSON.parse(pending.text);
@@ -91,15 +91,15 @@ describe('MCP analysis tools', () => {
   it('get_analysis_context stores the bundle it returned on the pending request', async () => {
     const lensDb = openLensDb(':memory:');
     const { request } = queued(lensDb);
-    const client = await connectedClient(lensDb, null);
+    const client = await connectedClient(lensDb);
     const ctx = await call(client, 'get_analysis_context', { id: request.id });
     const stored = getAnalysisRequest(lensDb, request.id);
     expect(JSON.parse(stored?.context ?? '{}')).toEqual(JSON.parse(ctx.text));
-    expect(JSON.parse(ctx.text).since_last_decision).toBeNull();
+    expect(JSON.parse(ctx.text).since_last_decision).toMatchObject({ total: 0, unblocked_ips_alerts: 0 });
   });
 
   it('get_analysis_context reports an unknown request as an error', async () => {
-    const client = await connectedClient(openLensDb(':memory:'), null);
+    const client = await connectedClient(openLensDb(':memory:'));
     const res = await call(client, 'get_analysis_context', { id: 42 });
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/42 not found/);
@@ -107,12 +107,12 @@ describe('MCP analysis tools', () => {
 
   it('submit_analysis returns isError for a close with unblocked alerts', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: RECENT, category: 'ips_alert', signature: 'S', source_ip: IP, action: 'allowed' },
       { received_at: RECENT, category: 'ips_alert', signature: 'S', source_ip: IP, action: null },
     ]);
     const { finding, request } = queued(lensDb);
-    const client = await connectedClient(lensDb, sinkDb);
+    const client = await connectedClient(lensDb, eventsDb);
     const res = await call(client, 'submit_analysis', { id: request.id, ...close });
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/2 IPS alert\(s\)/);
@@ -130,16 +130,7 @@ describe('MCP analysis tools', () => {
     expect(getFindingById(lensDb, finding.id as number)?.status).toBe('attention');
   });
 
-  it('submit_analysis close without a sink is rejected as sink unavailable', async () => {
-    const lensDb = openLensDb(':memory:');
-    const { request } = queued(lensDb);
-    const client = await connectedClient(lensDb, null);
-    const res = await call(client, 'submit_analysis', { id: request.id, ...close });
-    expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/sink DB unavailable/);
-  });
-
-  it('submit_analysis close on a client finding against an old sink is rejected as sink unavailable', async () => {
+  it('submit_analysis close is rejected as unavailable when the events count query fails', async () => {
     const conn = new DatabaseSync(':memory:');
     conn.exec(
       `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
@@ -152,11 +143,11 @@ describe('MCP analysis tools', () => {
     const client = await connectedClient(lensDb, { conn });
     const res = await call(client, 'submit_analysis', { id: request.id, ...close });
     expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/sink DB unavailable/);
+    expect(res.text).toMatch(/events DB unavailable/);
   });
 
   it('submit_analysis on an unknown request reports not found', async () => {
-    const client = await connectedClient(openLensDb(':memory:'), null);
+    const client = await connectedClient(openLensDb(':memory:'));
     const res = await call(client, 'submit_analysis', { id: 7, ...close });
     expect(res.isError).toBe(true);
     expect(res.text).toMatch(/7 not found/);
@@ -167,7 +158,7 @@ describe('MCP analysis tools', () => {
     queued(lensDb, '198.51.100.1');
     queued(lensDb, '198.51.100.2');
     queued(lensDb, '198.51.100.3');
-    const client = await connectedClient(lensDb, null);
+    const client = await connectedClient(lensDb);
     const res = await call(client, 'get_pending_analyses', { limit: 2 });
     expect(JSON.parse(res.text)).toHaveLength(2);
     const bad = (await client.callTool({
@@ -183,11 +174,11 @@ describe('submit_analysis citations', () => {
 
   async function setup(action: string) {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: RECENT, category: 'ips_alert', signature: 'S', source_ip: IP, action },
     ]);
     const { finding, request } = queued(lensDb);
-    const client = await connectedClient(lensDb, sinkDb);
+    const client = await connectedClient(lensDb, eventsDb);
     const submit = (cited: number[]) =>
       call(client, 'submit_analysis', { id: request.id, ...close, cited_entries: cited });
     const status = () => getFindingById(lensDb, finding.id as number)?.status;

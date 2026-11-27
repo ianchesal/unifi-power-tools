@@ -6,96 +6,152 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import rateLimit from 'express-rate-limit';
 import { type RunnerDeps, runHourlyChecks, runRuleTriageBackfill } from './analysis/runner.js';
 import { createAnalysisRequestsRouter } from './api/analysisRequests.js';
+import { createAuthRouter, requireJsonOnWrites, requireSession } from './api/auth.js';
 import { createEventsRouter } from './api/events.js';
 import { createFindingsRouter } from './api/findings.js';
 import { createPlaybookRouter } from './api/playbook.js';
+import { secretEquals } from './auth/secretCompare.js';
+import { getOrCreateSessionSecret, sessionKey } from './auth/session.js';
 import type { Config } from './config.js';
+import type { EventsDb } from './db/eventsDb.js';
 import type { LensDb } from './db/lensDb.js';
-import type { SinkDb } from './db/sinkDb.js';
 import { loadHomelabServices } from './enrichment/homelabServices.js';
-import { createUnifiMcpClient } from './enrichment/unifiMcpClient.js';
-import { createLensMcpServer } from './mcp/server.js';
+import { createUnifiEnricher } from './enrichment/unifiEnricher.js';
+import type { SyslogListener } from './ingest/listener.js';
+import { createMcpServer } from './mcp/server.js';
+import type { IUnifiClient } from './unifi/client.js';
 
-export interface SchemaCheckResult {
-  ok: boolean;
-  missingColumns: string[];
+export interface AppDeps {
+  eventsDb: EventsDb;
+  lensDb: LensDb;
+  runnerDeps: RunnerDeps;
+  listener: Pick<SyslogListener, 'bound' | 'droppedCount'>;
+  unifiClient: IUnifiClient | null;
 }
 
-export function createApp(
-  sinkDb: SinkDb | null,
-  lensDb: LensDb,
-  runnerDeps: RunnerDeps | null,
-  config: Config,
-  schemaCheck: SchemaCheckResult | null = null
-) {
+export function createApp(deps: AppDeps, config: Config) {
+  const { eventsDb, lensDb, runnerDeps, listener, unifiClient } = deps;
   const app = express();
+  // Off unless TRUST_PROXY names the proxy (never `true`: port 3002 is also
+  // reachable directly, and a client could forge X-Forwarded-For). Set before
+  // the rate limiters so they key on the right address.
+  if (config.trustProxy !== null) {
+    app.set(
+      'trust proxy',
+      /^\d+$/.test(config.trustProxy) ? Number(config.trustProxy) : config.trustProxy
+    );
+  }
+  // Separate budgets: a triage run makes 100+ /mcp calls, which must not lock
+  // the dashboard out (or vice versa). Static assets aren't counted at all.
   app.use(
+    ['/api', '/ready'],
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 300,
+      limit: 300,
+      standardHeaders: true,
+      legacyHeaders: false,
+    })
+  );
+  app.use(
+    '/mcp',
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      limit: 3000,
       standardHeaders: true,
       legacyHeaders: false,
     })
   );
   app.use(express.json());
 
-  const unifiMcp = createUnifiMcpClient(config.unifiMcpServerUrl, config.unifiMcpServerToken);
+  const enricher = createUnifiEnricher(unifiClient);
   const homelabServices = loadHomelabServices(config.homelabServicesPath);
 
   const mcpAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Bearer ${config.mcpSecret}`) {
+    const match = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
+    if (!match || !secretEquals(match[1], config.mcpSecret)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
     next();
   };
 
-  app.get('/health', (_req, res) => {
-    const schemaOk = !sinkDb || !schemaCheck || schemaCheck.ok;
-    const status = sinkDb && schemaOk ? 'ok' : 'degraded';
-    const body: {
-      status: 'ok' | 'degraded';
-      sinkDb: 'available' | 'unavailable';
-      schema: 'ok' | 'mismatch' | 'unknown';
-      missingColumns?: string[];
-    } = {
-      status,
-      sinkDb: sinkDb ? 'available' : 'unavailable',
-      schema: !sinkDb ? 'unknown' : schemaCheck ? (schemaCheck.ok ? 'ok' : 'mismatch') : 'unknown',
-    };
-    if (sinkDb && schemaCheck && !schemaCheck.ok) {
-      body.missingColumns = schemaCheck.missingColumns;
+  // Liveness: no network calls. status is ok only if syslog is bound and the
+  // events DB answers.
+  const coreStatus = () => {
+    let eventsDbStatus: 'ok' | 'error' = 'ok';
+    try {
+      eventsDb.conn.prepare('SELECT 1').get();
+    } catch {
+      eventsDbStatus = 'error';
     }
-    res.json(body);
+    const bound = listener.bound();
+    return {
+      status: bound && eventsDbStatus === 'ok' ? ('ok' as const) : ('degraded' as const),
+      syslog: { bound, droppedMessages: listener.droppedCount() },
+      eventsDb: eventsDbStatus,
+    };
+  };
+
+  // 503 when degraded: the Docker healthcheck only looks at the exit code, and
+  // ingest stopping is the one failure that can't be recovered afterwards.
+  app.get('/health', (_req, res) => {
+    const core = coreStatus();
+    res.status(core.status === 'ok' ? 200 : 503).json(core);
   });
 
-  app.use('/api', createEventsRouter(sinkDb));
-  app.use('/api', createFindingsRouter(lensDb, sinkDb));
+  // Readiness: adds UniFi reachability. UniFi being down doesn't make the
+  // service unready for ingest, so only the core status decides the code.
+  app.get('/ready', async (_req, res) => {
+    const core = coreStatus();
+    let unifi: 'ok' | 'unavailable' | 'not_configured' = 'not_configured';
+    if (unifiClient) {
+      try {
+        await unifiClient.get('stat/sysinfo');
+        unifi = 'ok';
+      } catch {
+        unifi = 'unavailable';
+      }
+    }
+    res.status(core.status === 'ok' ? 200 : 503).json({ ...core, unifi });
+  });
+
+  // Dashboard auth: /api/auth is open, everything else under /api needs a
+  // session cookie, and writes must be JSON. /mcp (bearer) and /health, /ready
+  // sit outside /api and are unaffected.
+  const sessionSigningKey = sessionKey(getOrCreateSessionSecret(lensDb), config.dashboardPassword);
+  app.use(
+    '/api/auth',
+    createAuthRouter({ key: sessionSigningKey, password: config.dashboardPassword })
+  );
+  app.use('/api', requireSession(sessionSigningKey));
+  app.use('/api', requireJsonOnWrites);
+
+  app.use('/api', createEventsRouter(eventsDb));
+  app.use('/api', createFindingsRouter(lensDb, eventsDb));
   app.use('/api', createAnalysisRequestsRouter(lensDb));
   app.use('/api/playbook', createPlaybookRouter(lensDb, homelabServices));
 
   app.post('/api/analysis/run', (_req, res) => {
-    if (!runnerDeps) {
-      res.status(503).json({ error: 'Sink DB is unavailable; analysis cannot run.' });
-      return;
-    }
     const result = runHourlyChecks(runnerDeps);
     res.json(result);
   });
 
   app.post('/api/admin/backfill-rule-triage', (_req, res) => {
-    if (!runnerDeps) {
-      res.status(503).json({ error: 'Sink DB is unavailable; backfill cannot run.' });
-      return;
-    }
     const result = runRuleTriageBackfill(runnerDeps);
     res.json(result);
   });
 
   app.post('/mcp', mcpAuthMiddleware, async (req, res, next) => {
-    const mcpServer = createLensMcpServer(
-      { lensDb, sinkDb, unifiMcp, homelabServices },
+    const mcpServer = createMcpServer(
+      {
+        lensDb,
+        eventsDb,
+        enricher,
+        homelabServices,
+        unifi: unifiClient
+          ? { client: unifiClient, allowWrites: config.unifi?.allowWrites === true }
+          : null,
+      },
       { trustedAdminNames: config.trustedAdminNames }
     );
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -128,7 +184,8 @@ export function createApp(
         req.method !== 'GET' ||
         req.path.startsWith('/api') ||
         req.path.startsWith('/mcp') ||
-        req.path.startsWith('/health')
+        req.path.startsWith('/health') ||
+        req.path.startsWith('/ready')
       ) {
         next();
         return;

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
 import { openLensDb, type LensDb } from '../../src/db/lensDb.js';
 import {
   getFinding,
@@ -26,29 +25,8 @@ import {
   runRuleTriageBackfill,
 } from '../../src/analysis/runner.js';
 import { reanalyze } from '../../src/analysis/pipeline.js';
-import { runnerDeps, seededSinkDb } from '../helpers.js';
+import { runnerDeps, seededEventsDb } from '../helpers.js';
 
-// Pre-sink-v1.0.3 schema: no client columns.
-function legacySinkDb(
-  rows: {
-    received_at: string;
-    category: string;
-    signature: string | null;
-    source_ip: string | null;
-  }[]
-) {
-  const conn = new DatabaseSync(':memory:');
-  conn.exec(
-    `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, category TEXT,
-     signature TEXT, source_ip TEXT, severity INTEGER, action TEXT, message TEXT,
-     dest_ip TEXT, dest_port INTEGER)`
-  );
-  const stmt = conn.prepare(
-    'INSERT INTO events (received_at, category, signature, source_ip) VALUES (?, ?, ?, ?)'
-  );
-  for (const r of rows) stmt.run(r.received_at, r.category, r.signature, r.source_ip);
-  return { conn };
-}
 
 const HOUR = 3600_000;
 
@@ -100,11 +78,11 @@ function expectQueued(lensDb: LensDb, f: Finding | undefined) {
 describe('runHourlyChecks', () => {
   it('flags a brand-new signature and a brand-new source IP', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const types = listFindings(lensDb, { view: 'all' }).flatMap((f) => f.triggers.map((t) => t.type));
     expect(types).toContain('new_signature');
@@ -113,11 +91,11 @@ describe('runHourlyChecks', () => {
 
   it('flags an internal-source event', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '10.0.30.5' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
 
     expect(byKey(lensDb, '10.0.30.5')?.triggers.some((t) => t.type === 'internal_source')).toBe(true);
   });
@@ -125,31 +103,31 @@ describe('runHourlyChecks', () => {
   it('flags a repeat offender once it crosses the distinct-day threshold', () => {
     const now = new Date('2026-08-31T12:00:00Z');
     const days = ['2026-08-29', '2026-08-30', '2026-08-31'];
-    const sinkDb = seededSinkDb(
+    const eventsDb = seededEventsDb(
       days.map((d) => ({ received_at: `${d}T01:00:00Z`, category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.9' }))
     );
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expect(byKey(lensDb, '203.0.113.9')?.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(true);
   });
 
   it('never raises a finding for an ignored signature (Protect doorbell ring)', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([{ received_at: now.toISOString(), category: 'siteactivity', signature: '2154' }]);
+    const eventsDb = seededEventsDb([{ received_at: now.toISOString(), category: 'siteactivity', signature: '2154' }]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expect(listFindings(lensDb, { view: 'all' })).toEqual([]);
   });
 
   it('queues a new finding no rule explains, with empty context', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     for (const key of ['203.0.113.5', 'ips_alert|ET SCAN Nmap']) {
       const f = byKey(lensDb, key);
@@ -162,19 +140,19 @@ describe('runHourlyChecks', () => {
 
   it('queues a new finding for AI when rule matching throws (sink error fails towards the AI)', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET DROP Spamhaus', source_ip: '203.0.113.5' },
     ]);
     // Only the rule-completeness COUNT queries throw; the hourly scan itself works.
-    const realPrepare = sinkDb.conn.prepare.bind(sinkDb.conn);
-    sinkDb.conn.prepare = ((sql: string) => {
+    const realPrepare = eventsDb.conn.prepare.bind(eventsDb.conn);
+    eventsDb.conn.prepare = ((sql: string) => {
       if (sql.includes('COUNT(*) as n FROM events WHERE')) throw new Error('database disk image is malformed');
       return realPrepare(sql);
-    }) as typeof sinkDb.conn.prepare;
+    }) as typeof eventsDb.conn.prepare;
     const lensDb = openLensDb(':memory:');
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+      runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
       expect(errors).toHaveBeenCalledWith(
         expect.stringContaining('Rule matching failed'),
         expect.any(Error)
@@ -198,7 +176,7 @@ describe('runHourlyChecks', () => {
     // window can see the events that back it.
     markSeenSourceIp(lensDb, '203.0.113.9', '2026-08-01T00:00:00Z');
     markSeenSignature(lensDb, 'ips_alert', 'ET DROP Foo', '2026-08-01T00:00:00Z');
-    const sinkDb = seededSinkDb(
+    const eventsDb = seededEventsDb(
       ['2026-08-21', '2026-08-25', '2026-08-29'].map((d) => ({
         received_at: `${d}T01:00:00Z`,
         category: 'ips_alert',
@@ -207,7 +185,7 @@ describe('runHourlyChecks', () => {
         action: 'blocked',
       }))
     );
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const f = byKey(lensDb, '203.0.113.9');
     expect(f?.triggers.map((t) => t.type)).toEqual(['repeat_offender']);
@@ -217,18 +195,18 @@ describe('runHourlyChecks', () => {
 
   it('does not re-route an existing triaging finding that gains another trigger', () => {
     const now = new Date('2026-08-31T12:00:00Z');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.9' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
-    const insert = sinkDb.conn.prepare(
+    const insert = eventsDb.conn.prepare(
       "INSERT INTO events (received_at, category, signature, source_ip, raw) VALUES (?, 'ips_alert', 'ET SCAN Nmap', '203.0.113.9', 'raw')"
     );
     insert.run('2026-09-01T01:00:00Z');
     insert.run('2026-09-02T01:00:00Z');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date('2026-09-02T12:00:00Z'));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date('2026-09-02T12:00:00Z'));
 
     const f = byKey(lensDb, '203.0.113.9');
     expect(f?.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(true);
@@ -243,13 +221,13 @@ describe('runHourlyChecks', () => {
     upsertFinding(lensDb, applyTrigger(null, 'new_signature', t0, 'signature', 'ips_alert|ET SCAN Nmap'));
     markSeenSourceIp(lensDb, '203.0.113.5', t0);
     markSeenSignature(lensDb, 'ips_alert', 'ET SCAN Nmap', t0);
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-31T10:00:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
       { received_at: '2026-08-31T11:00:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
       // A different source on the same signature moves the signature's activity only.
       { received_at: '2026-08-31T11:30:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.6' },
     ]);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date('2026-08-31T12:00:00Z'));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date('2026-08-31T12:00:00Z'));
 
     expect(getFinding(lensDb, 'source_ip', '203.0.113.5')?.last_activity_at).toBe('2026-08-31T11:00:00.000Z');
     expect(getFinding(lensDb, 'signature', 'ips_alert|ET SCAN Nmap')?.last_activity_at).toBe(
@@ -257,7 +235,7 @@ describe('runHourlyChecks', () => {
     );
 
     // Never backwards: a later pass that only sees older events leaves it alone.
-    const olderOnly = seededSinkDb([
+    const olderOnly = seededEventsDb([
       { received_at: '2026-08-31T09:30:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
     ]);
     runHourlyChecks(runnerDeps(olderOnly, lensDb), new Date('2026-08-31T13:00:00Z'));
@@ -272,7 +250,7 @@ describe('runHourlyChecks', () => {
     const t0 = '2026-08-31T12:00:00.000Z';
     const f = upsertFinding(lensDb, applyTrigger(null, 'repeat_offender', t0, 'source_ip', '203.0.113.9'));
     closeAs(lensDb, f, 'ai', t0);
-    runHourlyChecks(runnerDeps(seededSinkDb([]), lensDb), new Date('2026-09-30T12:00:00Z'));
+    runHourlyChecks(runnerDeps(seededEventsDb([]), lensDb), new Date('2026-09-30T12:00:00Z'));
 
     const after = byKey(lensDb, '203.0.113.9');
     expect(after?.triggers.find((t) => t.type === 'repeat_offender')?.active).toBe(false);
@@ -296,9 +274,9 @@ describe('runDailyAnomalyCheck', () => {
   }
 
   it('flags a signature whose count is far above its 14-day baseline, and queues it', () => {
-    const sinkDb = seededSinkDb(spikeRows('ips_alert', 'ET TROJAN Foo'));
+    const eventsDb = seededEventsDb(spikeRows('ips_alert', 'ET TROJAN Foo'));
     const lensDb = openLensDb(':memory:');
-    runDailyAnomalyCheck(runnerDeps(sinkDb, lensDb), '2026-08-30', new Date('2026-08-31T00:10:00Z'));
+    runDailyAnomalyCheck(runnerDeps(eventsDb, lensDb), '2026-08-30', new Date('2026-08-31T00:10:00Z'));
 
     const f = byKey(lensDb, 'ips_alert|ET TROJAN Foo');
     expect(f?.triggers.some((t) => t.type === 'anomaly' && t.active)).toBe(true);
@@ -307,14 +285,14 @@ describe('runDailyAnomalyCheck', () => {
   });
 
   it('routes a newly created anomaly finding through rules over the anomaly day', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       ...spikeRows('ips_alert', 'ET DROP Spike', { action: 'blocked' }),
       // The day after the anomaly day: outside [day, day+1), so a non-matching
       // event here must not spoil the rule's completeness check.
       { received_at: '2026-08-31T00:05:00Z', category: 'ips_alert', signature: 'ET DROP Spike', source_ip: '203.0.113.1', action: 'allowed' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runDailyAnomalyCheck(runnerDeps(sinkDb, lensDb), '2026-08-30', new Date('2026-08-31T00:10:00Z'));
+    runDailyAnomalyCheck(runnerDeps(eventsDb, lensDb), '2026-08-30', new Date('2026-08-31T00:10:00Z'));
 
     const f = byKey(lensDb, 'ips_alert|ET DROP Spike');
     expect(f?.triggers.map((t) => t.type)).toEqual(['anomaly']);
@@ -322,9 +300,9 @@ describe('runDailyAnomalyCheck', () => {
   });
 
   it('never flags an anomaly for an ignored signature (Protect doorbell ring)', () => {
-    const sinkDb = seededSinkDb(spikeRows('siteactivity', '2154', { source_ip: null }));
+    const eventsDb = seededEventsDb(spikeRows('siteactivity', '2154', { source_ip: null }));
     const lensDb = openLensDb(':memory:');
-    runDailyAnomalyCheck(runnerDeps(sinkDb, lensDb), '2026-08-30');
+    runDailyAnomalyCheck(runnerDeps(eventsDb, lensDb), '2026-08-30');
 
     expect(listFindings(lensDb, { view: 'all' })).toEqual([]);
     const baselineRows = lensDb.conn.prepare('SELECT COUNT(*) as n FROM baselines').get() as { n: number };
@@ -337,11 +315,11 @@ describe('rule-based triage at creation', () => {
   const at = now.toISOString();
 
   it('rule-closes a reputation-blocklist new_source_ip finding with a rule-sourced analysis', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '203.0.113.5', action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const f = byKey(lensDb, '203.0.113.5');
     expectRuleClosed(lensDb, f);
@@ -350,79 +328,79 @@ describe('rule-based triage at creation', () => {
   });
 
   it('queues a signature outside the safe-prefix list', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE Backdoor family PCRat/Gh0st CnC traffic', source_ip: '203.0.113.6', action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expectQueued(lensDb, byKey(lensDb, '203.0.113.6'));
   });
 
   it('rule-closes a trusted admin audit-login new_source_ip finding', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'audit', source_ip: '192.168.1.134', message: 'Ian C. accessed UniFi Network using the web. Source IP: 192.168.1.134' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
 
     expectRuleClosed(lensDb, byKey(lensDb, '192.168.1.134'));
   });
 
   it('queues an untrusted admin audit login for AI', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'audit', source_ip: '192.168.1.200', message: 'Mallory accessed UniFi Network using the web. Source IP: 192.168.1.200' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
 
     expectQueued(lensDb, byKey(lensDb, '192.168.1.200'));
   });
 
   it('rule-closes an operational-noise new_source_ip finding', () => {
-    const sinkDb = seededSinkDb([{ received_at: at, category: 'internet_and_wan', source_ip: '192.168.1.1' }]);
+    const eventsDb = seededEventsDb([{ received_at: at, category: 'internet_and_wan', source_ip: '192.168.1.1' }]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expectRuleClosed(lensDb, byKey(lensDb, '192.168.1.1'));
   });
 
   it('rule-closes an operational-noise new_signature finding (device telemetry event code)', () => {
-    const sinkDb = seededSinkDb([{ received_at: at, category: 'unifi_devices', signature: '512', source_ip: '192.168.1.43' }]);
+    const eventsDb = seededEventsDb([{ received_at: at, category: 'unifi_devices', signature: '512', source_ip: '192.168.1.43' }]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expectRuleClosed(lensDb, byKey(lensDb, 'unifi_devices|512'));
   });
 
   it('rule-closes an operational-noise new_signature finding (software update event code)', () => {
-    const sinkDb = seededSinkDb([{ received_at: at, category: 'software_updates', signature: '510', source_ip: '192.168.1.207' }]);
+    const eventsDb = seededEventsDb([{ received_at: at, category: 'software_updates', signature: '510', source_ip: '192.168.1.207' }]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expectRuleClosed(lensDb, byKey(lensDb, 'software_updates|510'));
   });
 
   it('rule-closes a low-signal-category new_signature finding (system bookkeeping event)', () => {
-    const sinkDb = seededSinkDb([{ received_at: at, category: 'system', signature: '100', source_ip: '192.168.1.1' }]);
+    const eventsDb = seededEventsDb([{ received_at: at, category: 'system', signature: '100', source_ip: '192.168.1.1' }]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expectRuleClosed(lensDb, byKey(lensDb, 'system|100'));
   });
 
   it('queues an untrusted-name audit-category new_signature finding for AI', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'audit', signature: '200', source_ip: '192.168.1.200', message: 'Mallory accessed UniFi Network using the web. Source IP: 192.168.1.200' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { trustedAdminNames: ['Ian C.'] }), now);
 
     expectQueued(lensDb, byKey(lensDb, 'audit|200'));
   });
 
   it('rule-closes an internal-source finding whose events are all operational noise', () => {
-    const sinkDb = seededSinkDb([{ received_at: at, category: 'unifi_devices', signature: '514', source_ip: '10.0.30.43' }]);
+    const eventsDb = seededEventsDb([{ received_at: at, category: 'unifi_devices', signature: '514', source_ip: '10.0.30.43' }]);
     const lensDb = openLensDb(':memory:');
     // Pre-seed the signature and source IP as already-known so only the
     // internal-source loop (not new-signature/new-source-ip) processes this
@@ -430,7 +408,7 @@ describe('rule-based triage at creation', () => {
     // device telemetry, which is the actual "device switching APs" scenario.
     markSeenSignature(lensDb, 'unifi_devices', '514', at);
     markSeenSourceIp(lensDb, '10.0.30.43', at);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
 
     const f = byKey(lensDb, '10.0.30.43');
     expect(f?.triggers.some((t) => t.type === 'internal_source' && t.active)).toBe(true);
@@ -438,11 +416,11 @@ describe('rule-based triage at creation', () => {
   });
 
   it('same-pass reopen: a rule-closed source IP that also trips internal-source ends the pass triaging with a pending request', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), now);
 
     const f = listFindings(lensDb, { view: 'all' }).find((x) => x.entity_key === '10.0.30.5')!;
     expect(f.status).toBe('triaging');
@@ -463,34 +441,34 @@ describe('rule-based triage at creation', () => {
   };
 
   it('rule-closes a new_signature finding whose events all match a known homelab service egress port', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE Backdoor family PCRat/Gh0st CnC traffic', source_ip: '192.168.1.26', dest_ip: '198.51.100.20', dest_port: 50300, action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { homelabServices: tranquility }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { homelabServices: tranquility }), now);
 
     const req = expectRuleClosed(lensDb, byKey(lensDb, 'ips_alert|ET MALWARE Backdoor family PCRat/Gh0st CnC traffic'));
     expect(req.recommendation).toContain('slskd');
   });
 
   it('queues via no homelab-service match when an event falls outside the known port', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE Backdoor family PCRat/Gh0st CnC traffic', source_ip: '192.168.1.26', dest_ip: '198.51.100.20', dest_port: 50300, action: 'blocked' },
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE Backdoor family PCRat/Gh0st CnC traffic', source_ip: '192.168.1.26', dest_ip: '198.51.100.9', dest_port: 4444, action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { homelabServices: tranquility }), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { homelabServices: tranquility }), now);
 
     expectQueued(lensDb, byKey(lensDb, 'ips_alert|ET MALWARE Backdoor family PCRat/Gh0st CnC traffic'));
   });
 
   it('rule-closes a new_source_ip finding whose only event is a blocked hit against a wanExposed host', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE VenomRAT CnC Server Keepalive', source_ip: '203.0.113.16', dest_ip: '192.168.1.26', dest_port: 58370, action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
     runHourlyChecks(
-      runnerDeps(sinkDb, lensDb, {
+      runnerDeps(eventsDb, lensDb, {
         homelabServices: { '192.168.1.26': { label: 'tranquility', wanExposed: true, services: [{ port: 50300, name: 'slskd' }] } },
       }),
       now
@@ -501,12 +479,12 @@ describe('rule-based triage at creation', () => {
   });
 
   it('queues when the exposed-host target is not marked wanExposed', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE VenomRAT CnC Server Keepalive', source_ip: '203.0.113.16', dest_ip: '192.168.1.26', dest_port: 58370, action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
     runHourlyChecks(
-      runnerDeps(sinkDb, lensDb, { homelabServices: { '192.168.1.26': { label: 'tranquility', services: [] } } }),
+      runnerDeps(eventsDb, lensDb, { homelabServices: { '192.168.1.26': { label: 'tranquility', services: [] } } }),
       now
     );
 
@@ -514,13 +492,13 @@ describe('rule-based triage at creation', () => {
   });
 
   it('queues when an event misses the wanExposed host', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE VenomRAT CnC Server Keepalive', source_ip: '203.0.113.16', dest_ip: '192.168.1.26', dest_port: 58370, action: 'blocked' },
       { received_at: at, category: 'ips_alert', signature: 'ET MALWARE VenomRAT CnC Server Keepalive', source_ip: '203.0.113.16', dest_ip: '10.0.0.9', dest_port: 22, action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
     runHourlyChecks(
-      runnerDeps(sinkDb, lensDb, { homelabServices: { '192.168.1.26': { label: 'tranquility', wanExposed: true, services: [] } } }),
+      runnerDeps(eventsDb, lensDb, { homelabServices: { '192.168.1.26': { label: 'tranquility', wanExposed: true, services: [] } } }),
       now
     );
 
@@ -535,7 +513,7 @@ describe('runDailyRecheck', () => {
   // A closed source-IP finding (decided at t0) with new activity at `activityAt`
   // whose events are the given rows.
   function closedWithActivity(
-    rows: Parameters<typeof seededSinkDb>[0],
+    rows: Parameters<typeof seededEventsDb>[0],
     opts: { by?: ClosedBy; ip?: string; lanCidrs?: string[] } = {}
   ) {
     const ip = opts.ip ?? '203.0.113.5';
@@ -546,11 +524,11 @@ describe('runDailyRecheck', () => {
     closeAs(lensDb, f, opts.by ?? 'rule', t0);
     markSeenSourceIp(lensDb, ip, t0);
     for (const r of rows) if (r.signature) markSeenSignature(lensDb, r.category, r.signature, t0);
-    const sinkDb = seededSinkDb(rows);
-    const deps = runnerDeps(sinkDb, lensDb, { lanCidrs });
+    const eventsDb = seededEventsDb(rows);
+    const deps = runnerDeps(eventsDb, lensDb, { lanCidrs });
     // The hourly pass is what moves last_activity_at forward.
     runHourlyChecks(deps, new Date(now.getTime() - HOUR));
-    return { lensDb, sinkDb, deps };
+    return { lensDb, eventsDb, deps };
   }
 
   const blockedDrop = { received_at: '2026-08-22T10:00:00.000Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.5', action: 'blocked' };
@@ -619,10 +597,10 @@ describe('runDailyRecheck', () => {
     markSeenSourceIp(lensDb, '203.0.113.5', t0);
     markSeenSourceIp(lensDb, '203.0.113.6', t0);
     markSeenSignature(lensDb, 'ips_alert', 'ET DROP Foo', t0);
-    const sinkDb = seededSinkDb([blockedDrop, { ...blockedDrop, source_ip: '203.0.113.6' }]);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() - HOUR));
+    const eventsDb = seededEventsDb([blockedDrop, { ...blockedDrop, source_ip: '203.0.113.6' }]);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date(now.getTime() - HOUR));
 
-    expect(runDailyRecheck(runnerDeps(sinkDb, lensDb), now)).toEqual({ checked: 0, stillClosed: 0, requeued: 0 });
+    expect(runDailyRecheck(runnerDeps(eventsDb, lensDb), now)).toEqual({ checked: 0, stillClosed: 0, requeued: 0 });
     expect(byKey(lensDb, '203.0.113.5')?.status).toBe('attention');
     expect(byKey(lensDb, '203.0.113.6')?.status).toBe('triaging');
   });
@@ -630,20 +608,20 @@ describe('runDailyRecheck', () => {
   it('requeues a closed client finding with new activity (no rule can keep it closed)', () => {
     const MAC = 'aa:aa:aa:aa:aa:01';
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: t0, category: 'ips_alert', signature: 'ET MALWARE VenomRAT', source_client_mac: MAC },
     ]);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(t0));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date(t0));
     closeAs(lensDb, byKey(lensDb, MAC) as Finding, 'ai', t0);
-    sinkDb.conn
+    eventsDb.conn
       .prepare(
         "INSERT INTO events (received_at, category, signature, source_client_mac, raw) VALUES (?, 'ips_alert', 'ET MALWARE VenomRAT', ?, 'raw')"
       )
       .run('2026-08-22T10:00:00.000Z', MAC);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() - HOUR));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date(now.getTime() - HOUR));
     expect(byKey(lensDb, MAC)?.last_activity_at).toBe('2026-08-22T10:00:00.000Z');
 
-    expect(runDailyRecheck(runnerDeps(sinkDb, lensDb), now)).toEqual({ checked: 1, stillClosed: 0, requeued: 1 });
+    expect(runDailyRecheck(runnerDeps(eventsDb, lensDb), now)).toEqual({ checked: 1, stillClosed: 0, requeued: 1 });
     const f = byKey(lensDb, MAC);
     expect(f?.status).toBe('triaging');
     expect(getPendingRequestForFinding(lensDb, f?.id as number)?.is_recheck).toBe(1);
@@ -677,7 +655,7 @@ describe('runRuleTriageBackfill', () => {
   const firstSeen = '2026-08-20T12:00:00Z';
 
   it('closes an existing triaging finding whose window-scoped events all match a rule, and reports counts', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       // Before first_seen, inside [first_seen - 24h, first_seen) — first_seen is stamped
       // with the detection *run* time, at the end of the trailing window, not the start.
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.5', action: 'blocked' },
@@ -685,7 +663,7 @@ describe('runRuleTriageBackfill', () => {
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', '203.0.113.5'));
 
-    const result = runRuleTriageBackfill(runnerDeps(sinkDb, lensDb));
+    const result = runRuleTriageBackfill(runnerDeps(eventsDb, lensDb));
 
     expect(result.checked).toBe(1);
     expect(result.closed).toBe(1);
@@ -697,7 +675,7 @@ describe('runRuleTriageBackfill', () => {
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'new_signature', firstSeen, 'signature', 'siteactivity|2154'));
 
-    const result = runRuleTriageBackfill(runnerDeps(seededSinkDb([]), lensDb));
+    const result = runRuleTriageBackfill(runnerDeps(seededEventsDb([]), lensDb));
 
     expect(result.closed).toBe(1);
     expect(result.byRule.ignored_signature).toBe(1);
@@ -705,7 +683,7 @@ describe('runRuleTriageBackfill', () => {
   });
 
   it('skips closed and attention findings', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.98', action: 'blocked' },
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.99', action: 'blocked' },
     ]);
@@ -715,7 +693,7 @@ describe('runRuleTriageBackfill', () => {
     const attention = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', '203.0.113.99'));
     updateFindingState(lensDb, attention.id as number, { status: 'attention' });
 
-    const result = runRuleTriageBackfill(runnerDeps(sinkDb, lensDb));
+    const result = runRuleTriageBackfill(runnerDeps(eventsDb, lensDb));
 
     expect(result.checked).toBe(0);
     expect(result.closed).toBe(0);
@@ -724,14 +702,14 @@ describe('runRuleTriageBackfill', () => {
   });
 
   it('backfill only considers triaging findings and cancels the pending request on close', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.7', action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
     const f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', '203.0.113.7'));
     const pending = createAnalysisRequest(lensDb, f.id as number, '2026-08-20T13:00:00Z');
 
-    const result = runRuleTriageBackfill(runnerDeps(sinkDb, lensDb), new Date('2026-08-25T00:00:00Z'));
+    const result = runRuleTriageBackfill(runnerDeps(eventsDb, lensDb), new Date('2026-08-25T00:00:00Z'));
 
     expect(result).toMatchObject({ checked: 1, closed: 1 });
     expect(getAnalysisRequest(lensDb, pending.id)?.status).toBe('cancelled');
@@ -743,7 +721,7 @@ describe('runRuleTriageBackfill', () => {
   });
 
   it('uses the 14-day window for a repeat-offender finding: older unexplained events keep it triaging', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       // Days 1-10 of the window: allowed, non-blocklist hits the rule can't explain.
       { received_at: '2026-08-08T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.20', action: 'allowed' },
       { received_at: '2026-08-12T01:00:00Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.20', action: 'allowed' },
@@ -754,33 +732,33 @@ describe('runRuleTriageBackfill', () => {
     const f = upsertFinding(lensDb, applyTrigger(null, 'repeat_offender', firstSeen, 'source_ip', '203.0.113.20'));
     createAnalysisRequest(lensDb, f.id as number, firstSeen);
 
-    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb))).toMatchObject({ checked: 1, closed: 0 });
+    expect(runRuleTriageBackfill(runnerDeps(eventsDb, lensDb))).toMatchObject({ checked: 1, closed: 0 });
     expectQueued(lensDb, byKey(lensDb, '203.0.113.20'));
   });
 
   it('closes a repeat-offender finding when every event in its 14-day window matches', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-08T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.21', action: 'blocked' },
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.21', action: 'blocked' },
     ]);
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'repeat_offender', firstSeen, 'source_ip', '203.0.113.21'));
 
-    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
+    expect(runRuleTriageBackfill(runnerDeps(eventsDb, lensDb)).closed).toBe(1);
   });
 
   it('uses the anomaly day (the day before first_seen) for an anomaly finding, even when the run was late', () => {
     // Daily job for 2026-08-19 ran late, at 18:00 on the 20th. The anomaly day
     // is all blocked ET DROP; the 20th itself has an allowed hit that a
     // [first_seen - 24h, first_seen) window would include.
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-19T03:00:00Z', category: 'ips_alert', signature: 'ET DROP Spike', source_ip: '203.0.113.1', action: 'blocked' },
       { received_at: '2026-08-20T06:00:00Z', category: 'ips_alert', signature: 'ET DROP Spike', source_ip: '203.0.113.1', action: 'allowed' },
     ]);
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'anomaly', '2026-08-20T18:00:00.000Z', 'signature', 'ips_alert|ET DROP Spike'));
 
-    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
+    expect(runRuleTriageBackfill(runnerDeps(eventsDb, lensDb)).closed).toBe(1);
   });
 
   // Creation window fully rule-explained: a never-decided finding here would close.
@@ -790,7 +768,7 @@ describe('runRuleTriageBackfill', () => {
 
   it('skips a finding the daily recheck requeued, even when its creation window is fully rule-explained', () => {
     const ip = '203.0.113.30';
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       explainedCreation(ip),
       // New, unexplained activity after the AI's decision: the reason for the requeue.
       { received_at: '2026-08-23T10:00:00.000Z', category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: ip },
@@ -800,7 +778,7 @@ describe('runRuleTriageBackfill', () => {
     closeAs(lensDb, f, 'ai', '2026-08-20T13:00:00.000Z');
     markSeenSourceIp(lensDb, ip, firstSeen);
     markSeenSignature(lensDb, 'ips_alert', 'ET SCAN Nmap', firstSeen);
-    const deps = runnerDeps(sinkDb, lensDb);
+    const deps = runnerDeps(eventsDb, lensDb);
     runHourlyChecks(deps, new Date('2026-08-23T11:00:00Z'));
     expect(runDailyRecheck(deps, new Date('2026-08-23T12:00:00Z')).requeued).toBe(1);
 
@@ -811,20 +789,20 @@ describe('runRuleTriageBackfill', () => {
 
   it('skips a finding an operator sent back for re-analysis', () => {
     const ip = '203.0.113.31';
-    const sinkDb = seededSinkDb([explainedCreation(ip)]);
+    const eventsDb = seededEventsDb([explainedCreation(ip)]);
     const lensDb = openLensDb(':memory:');
     const f = upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', ip));
     closeAs(lensDb, f, 'human', '2026-08-20T13:00:00.000Z');
     reanalyze(lensDb, f.id as number, '2026-08-21T09:00:00.000Z');
     expect(byKey(lensDb, ip)?.status).toBe('triaging');
 
-    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb))).toMatchObject({ checked: 0, closed: 0 });
+    expect(runRuleTriageBackfill(runnerDeps(eventsDb, lensDb))).toMatchObject({ checked: 0, closed: 0 });
     expect(byKey(lensDb, ip)?.status).toBe('triaging');
     expect(getPendingRequestForFinding(lensDb, f.id as number)).not.toBeNull();
   });
 
   it('anchors the completeness window to [first_seen - 24h, first_seen), not to now', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-08-20T01:00:00Z', category: 'ips_alert', signature: 'ET DROP Foo', source_ip: '203.0.113.9', action: 'blocked' },
       // Outside the [first_seen - 24h, first_seen) window (it's after first_seen) and
       // non-matching — must not count toward `total`, or completeness would wrongly fail.
@@ -833,7 +811,7 @@ describe('runRuleTriageBackfill', () => {
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'new_source_ip', firstSeen, 'source_ip', '203.0.113.9'));
 
-    expect(runRuleTriageBackfill(runnerDeps(sinkDb, lensDb)).closed).toBe(1);
+    expect(runRuleTriageBackfill(runnerDeps(eventsDb, lensDb)).closed).toBe(1);
   });
 });
 
@@ -851,17 +829,17 @@ describe('client findings', () => {
   });
   const clientFindings = (lensDb: LensDb) =>
     listFindings(lensDb, { view: 'all' }).filter((f) => f.entity_type === 'client');
-  const insertClientEvent = (sinkDb: ReturnType<typeof seededSinkDb>, at: string) =>
-    sinkDb.conn
+  const insertClientEvent = (eventsDb: ReturnType<typeof seededEventsDb>, at: string) =>
+    eventsDb.conn
       .prepare(
         "INSERT INTO events (received_at, category, signature, source_ip, source_client_mac, raw) VALUES (?, 'ips_alert', 'ET MALWARE VenomRAT', NULL, ?, 'raw')"
       )
       .run(at, MAC);
 
   it('raises a client finding for a client-only Security alert', () => {
-    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const eventsDb = seededEventsDb([clientRow(now.toISOString())]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const [finding] = clientFindings(lensDb);
     expect(finding.entity_key).toBe(MAC);
@@ -871,9 +849,9 @@ describe('client findings', () => {
   });
 
   it('a new client finding gets new_client + internal_source and is queued exactly once', () => {
-    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const eventsDb = seededEventsDb([clientRow(now.toISOString())]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const [f] = clientFindings(lensDb);
     expectQueued(lensDb, f);
@@ -881,18 +859,18 @@ describe('client findings', () => {
   });
 
   it('seeds client findings from all sink history on first run', () => {
-    const sinkDb = seededSinkDb([clientRow('2026-09-01T00:00:00Z')]);
+    const eventsDb = seededEventsDb([clientRow('2026-09-01T00:00:00Z')]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expect(clientFindings(lensDb).map((f) => f.entity_key)).toEqual([MAC]);
   });
 
   it('does not re-add new_client for an already-seen client', () => {
-    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const eventsDb = seededEventsDb([clientRow(now.toISOString())]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() + HOUR));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date(now.getTime() + HOUR));
 
     const [finding] = clientFindings(lensDb);
     expect(finding.triggers.filter((t) => t.type === 'new_client')).toHaveLength(1);
@@ -900,32 +878,32 @@ describe('client findings', () => {
   });
 
   it('updates a client finding last_activity_at from client-only events', () => {
-    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const eventsDb = seededEventsDb([clientRow(now.toISOString())]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
-    insertClientEvent(sinkDb, '2026-11-25T12:30:00.000Z');
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
+    insertClientEvent(eventsDb, '2026-11-25T12:30:00.000Z');
     // An IP-bearing row for the same MAC is not client-only and must not count.
-    sinkDb.conn
+    eventsDb.conn
       .prepare(
         "INSERT INTO events (received_at, category, signature, source_ip, source_client_mac, raw) VALUES ('2026-11-25T12:45:00.000Z', 'ips_alert', 'ET MALWARE VenomRAT', '192.168.1.26', ?, 'raw')"
       )
       .run(MAC);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() + HOUR));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date(now.getTime() + HOUR));
 
     expect(clientFindings(lensDb)[0].last_activity_at).toBe('2026-11-25T12:30:00.000Z');
   });
 
   it('keeps a closed client finding closed on fresh activity and on gaining repeat_offender', () => {
     const later = new Date(now.getTime() + HOUR);
-    const sinkDb = seededSinkDb([clientRow(now.toISOString())]);
+    const eventsDb = seededEventsDb([clientRow(now.toISOString())]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
     closeAs(lensDb, clientFindings(lensDb)[0], 'ai', now.toISOString());
 
-    insertClientEvent(sinkDb, later.toISOString());
-    insertClientEvent(sinkDb, '2026-11-22T01:00:00Z');
-    insertClientEvent(sinkDb, '2026-11-23T01:00:00Z');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), later);
+    insertClientEvent(eventsDb, later.toISOString());
+    insertClientEvent(eventsDb, '2026-11-22T01:00:00Z');
+    insertClientEvent(eventsDb, '2026-11-23T01:00:00Z');
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), later);
 
     const [finding] = clientFindings(lensDb);
     expect(finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(true);
@@ -935,72 +913,53 @@ describe('client findings', () => {
   });
 
   it('ignores non-Security, IP-bearing and name-only client rows', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       clientRow(now.toISOString(), { source_ip: '192.168.1.26', source_client_mac: 'aa:aa:aa:aa:aa:02' }),
       clientRow(now.toISOString(), { category: 'internet_and_wan', source_client_mac: 'aa:aa:aa:aa:aa:03' }),
       clientRow(now.toISOString(), { source_client_mac: null, source_client_name: 'nameonly' }),
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     expect(clientFindings(lensDb)).toEqual([]);
     expect(listFindings(lensDb, { view: 'all' }).some((f) => f.entity_type === 'source_ip' && f.entity_key === '192.168.1.26')).toBe(true);
   });
 
   it('flags a client repeat offender and lapses it when it drops out of the window', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       clientRow('2026-11-23T01:00:00Z'),
       clientRow('2026-11-24T01:00:00Z'),
       clientRow('2026-11-25T01:00:00Z'),
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
     const repeat = () => clientFindings(lensDb)[0].triggers.find((t) => t.type === 'repeat_offender');
     expect(repeat()?.active).toBe(true);
     expectQueued(lensDb, clientFindings(lensDb)[0]);
 
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date('2026-12-15T12:00:00Z'));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), new Date('2026-12-15T12:00:00Z'));
     expect(repeat()?.active).toBe(false);
     expect(clientFindings(lensDb)[0].status).toBe('triaging');
   });
 
   it('counts only NULL-IP rows toward client repeat-offender days', () => {
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       clientRow('2026-11-23T01:00:00Z', { source_ip: '192.168.1.26' }),
       clientRow('2026-11-24T01:00:00Z'),
       clientRow('2026-11-25T01:00:00Z'),
     ]);
     const lensDb = openLensDb(':memory:');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), now);
+    runHourlyChecks(runnerDeps(eventsDb, lensDb), now);
 
     const [finding] = clientFindings(lensDb);
     expect(finding.triggers.some((t) => t.type === 'repeat_offender' && t.active)).toBe(false);
-  });
-
-  it('still produces IP and signature findings (and their activity) on a pre-v1.0.3 sink', () => {
-    const sinkDb = legacySinkDb([
-      { received_at: now.toISOString(), category: 'ips_alert', signature: 'ET SCAN Nmap', source_ip: '203.0.113.5' },
-    ]);
-    const lensDb = openLensDb(':memory:');
-    expect(() => runHourlyChecks(runnerDeps(sinkDb, lensDb), now)).not.toThrow();
-
-    const types = listFindings(lensDb, { view: 'all' }).flatMap((f) => f.triggers.map((t) => t.type));
-    expect(types).toContain('new_signature');
-    expect(types).toContain('new_source_ip');
-    expect(clientFindings(lensDb)).toEqual([]);
-
-    sinkDb.conn
-      .prepare("INSERT INTO events (received_at, category, signature, source_ip) VALUES (?, 'ips_alert', 'ET SCAN Nmap', '203.0.113.5')")
-      .run('2026-11-25T12:30:00.000Z');
-    runHourlyChecks(runnerDeps(sinkDb, lensDb), new Date(now.getTime() + HOUR));
-    expect(getFinding(lensDb, 'source_ip', '203.0.113.5')?.last_activity_at).toBe('2026-11-25T12:30:00.000Z');
   });
 
   it('runRuleTriageBackfill skips client findings', () => {
     const lensDb = openLensDb(':memory:');
     upsertFinding(lensDb, applyTrigger(null, 'new_client', now.toISOString(), 'client', MAC));
 
-    const result = runRuleTriageBackfill(runnerDeps(seededSinkDb([]), lensDb));
+    const result = runRuleTriageBackfill(runnerDeps(seededEventsDb([]), lensDb));
     expect(result.checked).toBe(0);
     expect(result.closed).toBe(0);
     expect(clientFindings(lensDb)[0].status).toBe('triaging');

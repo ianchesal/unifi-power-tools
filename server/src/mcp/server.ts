@@ -2,7 +2,10 @@ import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { LensDb } from '../db/lensDb.js';
 import { listEntries, operatorBackedEntryIds } from '../db/playbookStore.js';
+import type { IUnifiClient } from '../unifi/client.js';
+import { allUnifiTools, registerUnifiTools } from '../unifi/tools/index.js';
 import type { AnalysisDeps } from './context.js';
+import { registerEventTools } from './eventTools.js';
 import { assemblePlaybook, type PlaybookOptions, type SiteEntry } from './playbook/assemble.js';
 import { registerPlaybookTools } from './playbookTools.js';
 import { registerAnalysisTools } from './tools.js';
@@ -11,10 +14,11 @@ import { registerAnalysisTools } from './tools.js';
 const { version } = createRequire(import.meta.url)('../../package.json') as { version: string };
 
 export const SERVER_INSTRUCTIONS =
-  'unifi-siem-lens is a triage queue for findings its rules could not close on a UniFi network. ' +
-  'Start with the `triage` prompt (in Claude Code: /mcp__unifi-siem-lens__triage), or call the ' +
-  '`get_playbook` tool where prompts are not available, and follow the playbook it returns: it ' +
-  'covers the run procedure, how to choose close or attention, and the guardrails the server enforces.';
+  'unifi-power-tools serves UniFi SIEM events, the UniFi Network API and a triage queue for findings ' +
+  'its rules could not close. Start with the `triage` prompt (in Claude Code: ' +
+  '/mcp__unifi-power-tools__triage, if your config entry is named unifi-power-tools), or call ' +
+  '`get_playbook` where prompts are not available, and follow it. Triage never calls UniFi write ' +
+  'tools, even when they are present.';
 
 function activeSiteEntries(db: LensDb): SiteEntry[] {
   const backed = operatorBackedEntryIds(db);
@@ -27,15 +31,25 @@ function activeSiteEntries(db: LensDb): SiteEntry[] {
 }
 
 // One server per /mcp request (stateless transport), built the same way in tests.
-export function createLensMcpServer(
-  deps: AnalysisDeps,
+export type McpDeps = AnalysisDeps & {
+  unifi: { client: IUnifiClient; allowWrites: boolean } | null;
+};
+
+export function createMcpServer(
+  deps: McpDeps,
   settings: Omit<PlaybookOptions, 'entries'>
 ): McpServer {
   const server = new McpServer(
-    { name: 'unifi-siem-lens', version },
+    { name: 'unifi-power-tools', version },
     { instructions: SERVER_INSTRUCTIONS }
   );
+  registerEventTools(server, deps.eventsDb);
   registerAnalysisTools(server, deps);
+  if (deps.unifi) {
+    registerUnifiTools(server, allUnifiTools(deps.unifi.client), {
+      allowWrites: deps.unifi.allowWrites,
+    });
+  }
   registerPlaybookTools(server, deps.lensDb);
 
   // Entries are read on each call, so an accepted proposal shows up at once.
@@ -46,7 +60,7 @@ export function createLensMcpServer(
     'triage',
     {
       title: 'Triage the analysis queue',
-      description: 'Work the unifi-siem-lens analysis queue using the served playbook.',
+      description: 'Work the unifi-power-tools analysis queue using the served playbook.',
     },
     () => ({
       messages: [

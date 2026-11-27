@@ -9,25 +9,30 @@ import {
 } from '../../src/db/analysisRequestsStore.js';
 import { getFinding, updateFindingState, upsertFinding } from '../../src/db/findingsStore.js';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
-import type { SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import type { HomelabRegistry } from '../../src/enrichment/homelabServices.js';
-import type { UnifiMcpClient } from '../../src/enrichment/unifiMcpClient.js';
+import { createUnifiEnricher, type UnifiEnricher } from '../../src/enrichment/unifiEnricher.js';
 import { type AnalysisDeps, buildAnalysisContext } from '../../src/mcp/context.js';
 import { runHourlyChecks } from '../../src/analysis/runner.js';
-import { runnerDeps, seededSinkDb } from '../helpers.js';
+import { runnerDeps, seededEventsDb, stubUnifiClient } from '../helpers.js';
 
 const NOW = '2026-11-25T12:00:00.000Z';
 const FIRST_SEEN = '2026-11-20T00:00:00.000Z';
 const IP = '198.51.100.4';
 const MAC = 'aa:aa:aa:aa:aa:01';
 
-const stubUnifi: UnifiMcpClient = {
+const stubUnifi: UnifiEnricher = {
   resolveClient: async () => null,
   getFirewallSummary: async () => null,
 };
 
-function deps(lensDb: LensDb, sinkDb: SinkDb | null, homelabServices: HomelabRegistry = {}): AnalysisDeps {
-  return { lensDb, sinkDb, unifiMcp: stubUnifi, homelabServices };
+function deps(
+  lensDb: LensDb,
+  eventsDb: EventsDb,
+  homelabServices: HomelabRegistry = {},
+  enricher: UnifiEnricher = stubUnifi
+): AnalysisDeps {
+  return { lensDb, eventsDb, enricher, homelabServices };
 }
 
 function ipFinding(db: LensDb): Finding {
@@ -40,7 +45,7 @@ const okCtx = { unblockedIpsAlertsSinceDecision: 0, activeEntryIds: new Set<numb
 describe('buildAnalysisContext', () => {
   it('builds history, prior analyses and since_last_decision counts', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       // before the first decision (2026-11-21T00:00Z)
       { received_at: '2026-11-20T06:00:00Z', category: 'ips_alert', signature: 'S', source_ip: IP, action: 'allowed' },
       // since the decision: one blocked, one unblocked IPS alert, one firewall event
@@ -55,7 +60,7 @@ describe('buildAnalysisContext', () => {
     const request = getPendingRequestForFinding(lensDb, f.id as number) as AnalysisRequestRow;
 
     const homelab = { '192.168.1.26': { label: 'homelab', services: [{ port: 8989, name: 'sonarr' }] } };
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb, homelab), request, finding, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb, homelab), request, finding, NOW);
 
     expect(ctx.finding.id).toBe(f.id);
     expect(ctx.history.map((h) => h.kind)).toEqual(['queued', 'ai_closed', 'recheck_queued']);
@@ -78,13 +83,13 @@ describe('buildAnalysisContext', () => {
 
   it('a never-decided finding measures since_last_decision from first_seen minus 14 days', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-11-01T00:00:00Z', category: 'ips_alert', signature: 'S', source_ip: IP, action: 'allowed' },
       { received_at: '2026-11-10T00:00:00Z', category: 'ips_alert', signature: 'S', source_ip: IP, action: 'allowed' },
     ]);
     const f = ipFinding(lensDb);
     const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), request, f, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb), request, f, NOW);
     expect(ctx.since_last_decision).toEqual({
       since: '2026-11-06T00:00:00.000Z',
       total: 1,
@@ -96,21 +101,21 @@ describe('buildAnalysisContext', () => {
 
   it('a finding reopened by internal_source after a rule close measures since_last_decision from its creation window', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       // older than the creation window: not counted
       { received_at: '2026-11-23T06:00:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
       // the events that created the finding, inside [first_seen - 24h, now)
       { received_at: '2026-11-25T11:30:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
       { received_at: '2026-11-25T11:45:00Z', category: 'ips_alert', signature: 'ET DROP Dshield Block Listed Source group 1', source_ip: '10.0.30.5', action: 'blocked' },
     ]);
-    runHourlyChecks(runnerDeps(sinkDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), new Date(NOW));
+    runHourlyChecks(runnerDeps(eventsDb, lensDb, { lanCidrs: ['10.0.0.0/8'] }), new Date(NOW));
     const finding = getFinding(lensDb, 'source_ip', '10.0.30.5') as Finding;
     // closeByRule stamped last_triaged_at with the run time, then internal_source reopened it.
     expect(finding.status).toBe('triaging');
     expect(finding.last_triaged_at).toBe(NOW);
     const request = getPendingRequestForFinding(lensDb, finding.id as number) as AnalysisRequestRow;
 
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), request, finding, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb), request, finding, NOW);
     expect(ctx.history.map((h) => h.kind)).toEqual(['created', 'rule_closed', 'trigger_added', 'queued']);
     expect(ctx.since_last_decision).toEqual({
       since: '2026-11-24T12:00:00.000Z',
@@ -121,7 +126,7 @@ describe('buildAnalysisContext', () => {
 
   it('adds a before/after summary only for recheck requests', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       // 14-day window before the decision
       { received_at: '2026-11-15T00:00:00Z', category: 'ips_alert', signature: 'S', source_ip: IP, action: 'blocked', dest_port: 22 },
       // outside the before window (older than decision − 14d)
@@ -140,21 +145,21 @@ describe('buildAnalysisContext', () => {
     const reopened = recheckRequeue(lensDb, closed, '2026-11-25T00:00:00.000Z');
     const recheckReq = getPendingRequestForFinding(lensDb, closed.id as number) as AnalysisRequestRow;
 
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), recheckReq, reopened, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb), recheckReq, reopened, NOW);
     expect(ctx.recheck?.before.total).toBe(1);
     expect(ctx.recheck?.before.top_dest_ports).toEqual([{ value: 22, count: 1 }]);
     expect(ctx.recheck?.after.total).toBe(2);
     expect(ctx.recheck?.after.top_counterparts).toEqual([{ value: 'T', count: 2 }]);
 
     const plain = { ...recheckReq, is_recheck: 0 };
-    const ctx2 = await buildAnalysisContext(deps(lensDb, sinkDb), plain, reopened, NOW);
+    const ctx2 = await buildAnalysisContext(deps(lensDb, eventsDb), plain, reopened, NOW);
     expect(ctx2.recheck).toBeNull();
     expect(ctx2.since_last_decision?.total).toBe(2);
   });
 
   it('includes baseline history for a signature finding', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-11-19T00:00:00Z', category: 'firewall_block', signature: 'weird-sig' },
     ]);
     lensDb.conn
@@ -165,19 +170,19 @@ describe('buildAnalysisContext', () => {
       applyTrigger(null, 'new_signature', FIRST_SEEN, 'signature', signatureKey('firewall_block', 'weird-sig'))
     );
     const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), request, f, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb), request, f, NOW);
     expect(ctx.recentEvents).toHaveLength(1);
     expect(ctx.baselineHistory).toEqual([{ day: '2026-11-18', count: 4 }]);
   });
 
   it('builds a client finding from its MAC with a display name', async () => {
     const lensDb = openLensDb(':memory:');
-    const sinkDb = seededSinkDb([
+    const eventsDb = seededEventsDb([
       { received_at: '2026-11-19T00:00:00Z', category: 'ips_alert', signature: 'sig', source_client_mac: MAC, source_client_name: 'tranquility', action: 'allowed' },
     ]);
     const f = upsertFinding(lensDb, applyTrigger(null, 'new_client', FIRST_SEEN, 'client', MAC));
     const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
-    const ctx = await buildAnalysisContext(deps(lensDb, sinkDb), request, f, NOW);
+    const ctx = await buildAnalysisContext(deps(lensDb, eventsDb), request, f, NOW);
     expect(ctx.recentEvents).toHaveLength(1);
     expect(ctx.recentEvents[0]).toMatchObject({ source_client_mac: MAC });
     expect(ctx.knownClient).toBeNull();
@@ -202,7 +207,7 @@ describe('buildAnalysisContext', () => {
     expect(ctx.history.map((h) => h.kind)).toEqual(['recheck_queued']);
   });
 
-  it('a client finding on a pre-v1.0.3 sink (no client columns) gets null since_last_decision, not a throw', async () => {
+  it('a failing events query yields null since_last_decision, not a throw', async () => {
     const conn = new DatabaseSync(':memory:');
     conn.exec(
       `CREATE TABLE events (id INTEGER PRIMARY KEY, received_at TEXT, event_time TEXT,
@@ -220,3 +225,35 @@ describe('buildAnalysisContext', () => {
     expect(ctx.finding).toMatchObject({ display_name: null });
   });
 });
+
+describe('buildAnalysisContext enrichment', () => {
+  it('still returns a context with null enrichment when UniFi is down', async () => {
+    const down = createUnifiEnricher({
+      ...stubUnifiClient,
+      get: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    });
+    const lensDb = openLensDb(':memory:');
+    const f = ipFinding(lensDb);
+    const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
+    const ctx = await buildAnalysisContext(deps(lensDb, seededEventsDb([]), {}, down), request, f, NOW);
+    expect(ctx.knownClient).toBeNull();
+    expect(ctx.firewallSummary).toBeNull();
+    expect(ctx.finding.id).toBe(f.id);
+  });
+
+  it('carries the resolved client name for a source IP finding', async () => {
+    const up = createUnifiEnricher({
+      ...stubUnifiClient,
+      get: async <T>(path: string) =>
+        (path === 'stat/alluser' ? [{ ip: IP, name: 'nas', network: 'LAN' }] : []) as T[],
+    });
+    const lensDb = openLensDb(':memory:');
+    const f = ipFinding(lensDb);
+    const request = queueForAnalysis(lensDb, f, FIRST_SEEN);
+    const ctx = await buildAnalysisContext(deps(lensDb, seededEventsDb([]), {}, up), request, f, NOW);
+    expect(ctx.knownClient).toEqual({ name: 'nas', network: 'LAN' });
+  });
+});
+

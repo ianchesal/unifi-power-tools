@@ -1,7 +1,7 @@
 import type { AiVerdictFields } from '../db/analysisRequestsStore.js';
 
 // Guardrails on an AI verdict, checked before it is recorded. Pure: callers
-// supply the sink-derived count and the sets of citable playbook entries.
+// supply the events-derived count and the sets of citable playbook entries.
 
 // Narrows the store's AiVerdictFields to what the MCP tool accepts, so a
 // validated input can be recorded as-is.
@@ -13,7 +13,7 @@ export interface AiVerdictInput extends AiVerdictFields {
 
 export interface VerdictContext {
   isRecheck: boolean;
-  // null = sink unavailable (no DB, or a query against it failed).
+  // null = the events query failed.
   unblockedIpsAlertsSinceDecision: number | null;
   activeEntryIds: ReadonlySet<number>;
   // The active entries whose current text the operator wrote or approved, as
@@ -45,7 +45,7 @@ export function validateAiVerdict(input: AiVerdictInput, ctx: VerdictContext): s
   if (unblocked === 0) return null;
   if (cited.length === 0) {
     return unblocked === null
-      ? 'sink DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention'
+      ? 'events DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention'
       : `${unblocked} IPS alert(s) since the last decision were not blocked; closing requires a cited playbook entry`;
   }
   if (!cited.some((id) => ctx.operatorBackedEntryIds.has(id))) {

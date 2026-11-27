@@ -4,21 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A visualization dashboard and code-driven (no-LLM) analysis layer on top of
-the sibling project `unifi-siem-sink`'s event store. It reads
-`unifi-siem-sink`'s `events.db` read-only, runs scheduled heuristics
-(new-signature/new-source-IP detection, internal-source flagging,
-repeat-offender tracking, z-score anomaly detection) to produce *findings*,
-and serves both a React dashboard and an MCP server. The MCP server is the
-key mechanism: this project has no LLM access of its own (no API key), so
-a finding the rules can't close is auto-queued as a request — a Claude Code
-session (subscription-authenticated, configured with this project's `/mcp`
-endpoint) fetches pending requests, reasons about them with real event
-context, and posts a verdict (`close` or `attention`) back via
-`submit_analysis`. It pairs
-with `unifi-mcp-server` (rest of the UniFi Network API) and
-`unifi-siem-sink` (the event source); this project adds no new UniFi API
-coverage, only analysis on top of what the sink already collects.
+**unifi-power-tools**: one service (one process, one image, one `/mcp`) that
+does three jobs for a UniFi network. It was three repos until v2.0.0
+(`unifi-siem-sink`, `unifi-mcp-server`, `unifi-siem-lens`); see
+`docs/superpowers/specs/2026-11-26-unifi-power-tools-merge-design.md`.
+
+1. **Syslog ingest** (`server/src/ingest/`): a UDP listener parses the
+   gateway's CEF export into `events.db`.
+2. **UniFi Network API tools** (`server/src/unifi/`): firewall, policies,
+   networks, clients, traffic rules, port forwards, monitoring, as MCP tools.
+   Write tools are registered only with `UNIFI_ALLOW_WRITES=true`.
+3. **Analysis and triage**: scheduled heuristics
+   (new-signature/new-source-IP detection, internal-source flagging,
+   repeat-offender tracking, z-score anomaly detection) produce *findings*,
+   served in a React dashboard and over MCP. The service has no LLM access of
+   its own (no API key), so a finding the rules can't close is auto-queued as
+   a request: a Claude Code session (subscription-authenticated, configured
+   with this project's `/mcp` endpoint) fetches pending requests, reasons
+   about them with real event context, and posts a verdict (`close` or
+   `attention`) back via `submit_analysis`. Inside the code this layer is
+   still called "lens" (`lens.db`, `LensDb`).
 
 A second, purely code-driven layer runs first: a set of rules (trusted-admin
 console logins, WAN/operational noise, blocked reputation-blocklist IDS hits,
@@ -49,14 +54,14 @@ Run a single server test file: `cd server && npx vitest run tests/analysis/findi
 Run tests matching a name: `cd server && npx vitest run -t "some test name"`
 
 `npm run dev -w server` (`node --watch --experimental-strip-types src/index.ts`)
-is currently broken on Node 24.x/25.x — the same known issue documented in
-`unifi-siem-sink`'s CLAUDE.md (`--experimental-strip-types` doesn't resolve
-`.js`-suffixed relative imports against sibling `.ts` files). Use
+is currently broken on Node 24.x/25.x (`--experimental-strip-types` doesn't
+resolve `.js`-suffixed relative imports against sibling `.ts` files). Use
 `npm run build -w server && npm run start -w server` instead, alongside
 `npm run dev -w web` for the frontend.
 
-Node >= 22.5.0 is required (uses `node:sqlite`, built in — no
-better-sqlite3 or other native SQLite dependency).
+Node >= 24 is required (uses `node:sqlite`, built in — no better-sqlite3 or
+other native SQLite dependency). `undici` is the one HTTP dependency, for the
+UniFi client's TLS-skip `Agent`.
 
 ## Architecture
 
@@ -64,28 +69,35 @@ Two npm workspaces: `server/` (Node/TS, Express, MCP SDK) and `web/`
 (React/Vite/Recharts). In production the server serves the built dashboard
 (`web/dist`) statically alongside its own API and MCP endpoint — one
 process, `server/src/server.ts`'s static/SPA-fallback middleware is
-registered *after* the `/api`, `/mcp`, and `/health` routes so it can never
-shadow them.
+registered *after* the `/api`, `/mcp`, `/health` and `/ready` routes so it
+can never shadow them. `server/src/index.ts` only loads config, installs a
+logging (non-exiting) `unhandledRejection` handler and calls `start()`
+(`server/src/start.ts`), which opens both DBs, seeds the playbook, **binds the
+syslog listener before the boot-time analysis runs** (they're synchronous and
+block the event loop), starts the hourly purge/analysis and daily timers, and
+listens. A failure to open the events DB or bind the syslog port is fatal.
 
 ### Two SQLite databases
 
-- **`events.db`** (path via `SINK_DB_PATH`) — the sink's database, opened
-  strictly **read-only** (`server/src/db/sinkDb.ts`). Never written to.
-  Tolerates being empty; a missing file is caught at startup and the server
-  boots in a degraded mode (schema check skipped, scheduled jobs skipped,
-  API routes return empty results / 503) rather than crashing — see
-  `index.ts`'s try/catch around `openSinkDb`. A schema-contract check
-  (`verifySchema`, `PRAGMA table_info`) runs at startup and is reflected in
-  `/health`, so a sink schema change surfaces loudly instead of causing
-  silent wrong-data queries.
+- **`events.db`** (path via `EVENTS_DB_PATH`) — the syslog event store,
+  migrated by `server/src/db/eventsDb.ts` (WAL, `auto_vacuum`, its own
+  numbered migrations; migration 3 re-parses client events and is safe to
+  re-run). `openEventsDb` returns **two connections**: a read-write
+  `writer` used only by ingest (`insertEvent`) and the hourly retention purge
+  (`purgeOldEvents`, `RETENTION_DAYS`), and a **read-only** `reader` for
+  analysis, `/api` and `/mcp`, so code handling attacker-influenced event text
+  can't write events. (For `:memory:` the reader shares the writer's
+  connection.) Analysis queries live in `db/eventQueries.ts`; the MCP event
+  tools' filter/stat queries in `db/eventSearch.ts`.
 - **`lens.db`** (path via `LENS_DB_PATH`) — this project's own store,
-  migrated the same numbered-`MIGRATIONS`-array way the sink migrates its
+  migrated the same numbered-`MIGRATIONS`-array way `eventsDb.ts` migrates its
   own DB (`server/src/db/lensDb.ts`). Holds `baselines` (rolling per-
   signature daily counts for anomaly detection), `seen_signatures` /
   `seen_source_ips` (first-seen tracking), `findings`, and
   `analysis_requests` (the Claude Code handoff queue), plus `seen_clients`
   (first-seen tracking for client findings, below), `finding_history`
-  (the per-finding audit trail, written by `pipeline.ts`) and the playbook
+  (the per-finding audit trail, written by `pipeline.ts`), `meta` (the
+  session-signing secret) and the playbook
   tables `playbook_entries`, `playbook_proposals` and `playbook_defaults_seen`.
 
 ### Analysis engine (`server/src/analysis/`)
@@ -108,13 +120,13 @@ admin backfill, via an `ignored_signature` rule checked first in
 pins it).
 
 **Client findings** (`entity_type: 'client'`, keyed by `source_client_mac`
-exactly as the sink stores it — lowercase, never re-normalised, never a
-name) cover LAN hosts UniFi identified only by name/MAC, which sink >= v1.0.3
-stores with `source_ip` NULL. Only *client-only Security events* back them:
+exactly as ingest stores it — lowercase, never re-normalised, never a
+name) cover LAN hosts UniFi identified only by name/MAC, which ingest stores
+with `source_ip` NULL. Only *client-only Security events* back them:
 `source_ip IS NULL AND source_client_mac IS NOT NULL AND category IN
 CLIENT_SECURITY_CATEGORIES` (`newEntity.ts`), ignored signatures excluded.
 `runner.ts`'s `client` check computes new clients as `allClientMacs` (all
-sink history) minus `seen_clients`, so the first run after deploy seeds
+event history) minus `seen_clients`, so the first run after deploy seeds
 findings for historical client-only alerts; each gets `new_client` +
 `internal_source` (always — LAN by definition; it's there so clients rank
 with internal IPs). `repeat-offender-client` mirrors the IP repeat-offender
@@ -122,10 +134,6 @@ pass in its own `runCheck`. Client findings never get rule triage:
 `matchRules` returns null for them and the backfill skips them, so they are
 always queued for AI — without that guard a client finding would fall into
 the signature branch with its MAC parsed as a signature key.
-**Old-sink isolation rule:** only the client-only helpers at the bottom of
-`sinkQueries.ts` may reference the `source_client_*` / `dest_client_*`
-columns; `recentEvents` and every other existing query must not, so a
-pre-v1.0.3 sink loses only client features.
 Client and IP findings for the same host are deliberately not merged (see
 `docs/superpowers/specs/2026-11-25-client-entities-design.md`).
 
@@ -161,18 +169,25 @@ with `is_recheck` set, and the verdict must then supply `why_now`.
 
 ### MCP handoff (`server/src/mcp/`, `server/src/db/analysisRequestsStore.ts`)
 
-`mcp/server.ts`'s `createLensMcpServer` builds the per-request `McpServer`
+`mcp/server.ts`'s `createMcpServer` builds the per-request `McpServer`
+(name `unifi-power-tools`)
 (stateless transport, one per `/mcp` request) with `instructions` pointing at
-the playbook, the analysis tools below, the playbook tools (`playbookTools.ts`),
-the `triage` prompt (`/mcp__unifi-siem-lens__triage`) and the `get_playbook`
-tool. Both serve `assemblePlaybook({ trustedAdminNames, entries })`
+the playbook, the event tools (`mcp/eventTools.ts`: `list_events`,
+`get_event`, `get_categories`, `get_event_stats`), the analysis tools below,
+the playbook tools (`playbookTools.ts`), the UniFi tools when UniFi is
+configured, the `triage` prompt and the `get_playbook` tool. The triage slash
+command comes from the client's config key, not the server name, so it is
+`/mcp__unifi-power-tools__triage` only if the entry is named that
+(`.mcp.json.example` does). Both serve `assemblePlaybook({ trustedAdminNames, entries })`
 (`mcp/playbook/`): the code-owned core (`core.ts`), a "Configured trusted
 admins" section built from `TRUSTED_ADMIN_NAMES`, and a "Site knowledge"
 section built from the active playbook entries. Both site sections are assembled
 on each call (site data never goes in the repo). The core is public, so it must
 stay generic: no real addresses, hostnames, port forwards or VPN endpoints. A
 test rejects IPv4 literals outside RFC 5737, and another fails if the playbook
-names a lens tool that isn't registered.
+names a tool that isn't registered: always-on tools with UniFi off, every tool
+with UniFi stubbed (`UNIFI_ONLY_TOOLS` in `core.ts` lists the UniFi-only
+ones). The core also tells triage never to call UniFi write tools.
 
 There is no "Analyze this" click: the pipeline queues an `analysis_requests`
 row (`queueForAnalysis`, at most one `pending` per finding) for every finding
@@ -181,8 +196,8 @@ the rules don't close, including client findings, and for rechecks
 built when a session fetches it (`mcp/context.ts`, `buildAnalysisContext`):
 the finding, `finding_history`, prior analyses, recent matching events (LIMIT
 20), baseline history, `since_last_decision` counts (total and unblocked IPS
-alerts), a `recheck` before/after summary, and optional `unifi-mcp-server` /
-homelab enrichment. Tools: `get_pending_analyses {limit?}`,
+alerts), a `recheck` before/after summary, and optional UniFi / homelab
+enrichment. Tools: `get_pending_analyses {limit?}`,
 `get_analysis_context {id}`, and `submit_analysis {id, verdict: 'close' |
 'attention', risk_level, summary, reasoning, recommended_action?, why_now?,
 cited_entries?}`. `submit_analysis` goes through `applyAiVerdict`, which runs
@@ -256,7 +271,7 @@ Operator-approved entries about this network, learned through proposals.
 `exposed_host_scan`, `ignored_signature`) — each taking already-computed data
 and returning a `TriageVerdict` (`risk_level` always `'low'`) or `null`. A rule
 matches only when **every** event backing the finding satisfies it —
-completeness is checked via paired `COUNT(*)` SQL queries in `sinkQueries.ts`
+completeness is checked via paired `COUNT(*)` SQL queries in `eventQueries.ts`
 (`sourceIpEventCounts`/`signatureEventCounts`/`auditCandidateEvents`),
 deliberately *not* the `eventsFor*` fetchers (`LIMIT 20`, sized for LLM prompt
 context) — a burst of more than 20 events could otherwise let the most recent
@@ -289,24 +304,55 @@ live path's scan, so the evidence is *before* it. Getting this window backwards
 is a documented past bug — see the `runner.ts` comment above `backfillWindow`
 before changing it.
 
-### Optional enrichment (`server/src/enrichment/unifiMcpClient.ts`)
+### UniFi tools (`server/src/unifi/`)
 
-`createUnifiMcpClient(url)` is a genuine no-op when `url` is `null`
-(no `Client`/transport constructed at all) and resolves to `null` on any
-connection failure rather than throwing — enrichment must never block the
-core analysis-request flow. Not required for anything else in this
-project; it's purely additive context for the Claude Code handoff.
+`unifi/client.ts` is the UniFi Network API client (`IUnifiClient`). Each
+module in `unifi/tools/` registers its tools into a collecting `ToolSink` and
+declares a hand-written `<MODULE>_TOOLS_READ_ONLY` map; `allUnifiTools`
+collects them (throwing on a tool with no declaration) and
+`registerUnifiTools` skips every `readOnly: false` tool unless
+`allowWrites`, emitting `readOnlyHint`/`destructiveHint` annotations. Writes
+are unregistered rather than refused so a triage session (which reads
+attacker-influenced text) never sees them. Tests pin the counts (37 tools, 22
+writes) and check every `create_|update_|delete_|block_|unblock_|set_|remove_`
+tool is declared a write.
+
+### Optional enrichment (`server/src/enrichment/unifiEnricher.ts`)
+
+`createUnifiEnricher(client)` is a no-op when UniFi isn't configured and
+resolves to `null` on any API error rather than throwing — enrichment must
+never block the analysis-request flow. `resolveClient(ip)` searches
+`stat/alluser` (online and offline) for a matching `ip` or `last_ip` and
+returns `{ name: name ?? hostname, network }`; `getFirewallSummary()` is the
+firewall rule list as JSON, capped at 8 KB. (The pre-merge MCP-based lookup
+never worked: it called `get_client` with an IP, but that tool takes a MAC.)
 
 ## Config
 
 All runtime config is env-driven, loaded once in `server/src/config.ts`
-(`loadConfig`) — fails fast if `SINK_DB_PATH` or `MCP_SECRET` is unset or
-`LOG_LEVEL` is invalid. `HOST` defaults to `127.0.0.1` (not `0.0.0.0`)
-since the dashboard/REST API have no authentication of their own by design
-(a single-user LAN tool) — widen it deliberately, never as an accident.
-The `/mcp` endpoint is the one exception: it requires
-`Authorization: Bearer <MCP_SECRET>` (checked in `server/src/server.ts`'s
-`mcpAuthMiddleware`, applied only to the `/mcp` route), mirroring
-`unifi-mcp-server`'s auth so a Claude Code session configured against a
-LAN-exposed lens instance still needs the shared secret. See the README's
-Environment Variables table for the full list and defaults.
+(`loadConfig`) — fails fast if `MCP_SECRET` or `DASHBOARD_PASSWORD` is unset,
+if they're equal, if `TRUST_PROXY` is `true`, if only one of
+`UNIFI_HOST`/`UNIFI_API_KEY` is set, if `LOG_LEVEL` is invalid, or if any
+pre-merge variable in `REMOVED_ENV_VARS` is still set (the error names the
+replacement). `HOST` defaults to `127.0.0.1` (not `0.0.0.0`) — widen it
+deliberately, never as an accident; this is a LAN tool, never internet-facing.
+
+Auth (`server/src/auth/`, `server/src/api/auth.ts`):
+- **Dashboard/REST:** `POST /api/auth/login` checks `DASHBOARD_PASSWORD`
+  (constant time) and sets `upt_session`, a stateless signed cookie
+  (`<expiryMs>.<HMAC>`, 30 days, `HttpOnly`, `SameSite=Strict`, `Secure` when
+  `req.secure`). The HMAC key is `scrypt(password, sessionSecret)`
+  with `sessionSecret` 32 random bytes in `lens.db`'s `meta` table: sessions
+  survive restarts, a password change logs everyone out, and a captured cookie
+  can't be used to guess the password offline. Everything under `/api` except
+  `/api/auth/*` requires the cookie (`requireSession`), and every write there
+  must be `application/json` (`requireJsonOnWrites`, 415 otherwise). Failed
+  logins are rate-limited (10 per 15 minutes; successes don't count).
+- **`trust proxy`** is off unless `TRUST_PROXY` names the proxy; never `true`,
+  because port 3002 is reachable directly and `X-Forwarded-For` could be forged.
+- **`/mcp`:** `Authorization: Bearer <MCP_SECRET>` via `secretEquals`
+  (constant time); it ignores the cookie. `/health` and `/ready` are open.
+- Router-level tests mount routers on a bare `express()` and skip auth; tests
+  through `createApp` sign in with `loginAgent` from `tests/helpers.ts`.
+
+See the README's Environment Variables table for the full list and defaults.

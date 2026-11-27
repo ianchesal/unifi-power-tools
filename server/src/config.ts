@@ -11,16 +11,53 @@ const DEFAULT_SAFE_SIGNATURE_PREFIXES = [
 export interface Config {
   port: number;
   host: string;
-  sinkDbPath: string;
+  eventsDbPath: string;
+  retentionDays: number;
+  syslogUdpPort: number;
+  syslogBindAddress: string;
+  maxMessageBytes: number;
   lensDbPath: string;
   lanCidrs: string[];
-  unifiMcpServerUrl: string | null;
-  unifiMcpServerToken: string | null;
   logLevel: LogLevel;
   mcpSecret: string;
+  dashboardPassword: string;
+  // Passed to Express `trust proxy` verbatim (numeric strings as hop counts).
+  trustProxy: string | null;
   trustedAdminNames: string[];
   safeSignaturePrefixes: string[];
   homelabServicesPath: string;
+  // null when UniFi isn't configured (neither UNIFI_HOST nor UNIFI_API_KEY set).
+  unifi: UnifiConfig | null;
+}
+
+export interface UnifiConfig {
+  host: string;
+  apiKey: string;
+  site: string;
+  verifyTls: boolean;
+  timeoutMs: number;
+  // Only the literal 'true' registers UniFi write tools on /mcp.
+  allowWrites: boolean;
+}
+
+function loadUnifiConfig(): UnifiConfig | null {
+  // The client builds https://<host>/proxy/..., so accept a pasted URL and keep
+  // only the host (and port).
+  const host = (process.env.UNIFI_HOST ?? '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+  const apiKey = process.env.UNIFI_API_KEY?.trim() ?? '';
+  if (!host && !apiKey) return null;
+  if (!host || !apiKey) throw new Error('UNIFI_HOST and UNIFI_API_KEY must be set together');
+  return {
+    host,
+    apiKey,
+    site: process.env.UNIFI_SITE?.trim() || 'default',
+    verifyTls: process.env.UNIFI_VERIFY_TLS === 'true',
+    timeoutMs: parseIntEnv('UNIFI_REQUEST_TIMEOUT_MS', 10000),
+    allowWrites: process.env.UNIFI_ALLOW_WRITES === 'true',
+  };
 }
 
 function parseIntEnv(key: string, defaultValue: number): number {
@@ -40,13 +77,39 @@ function parseCommaList(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
+// Variables from the three pre-merge services. A stale .env must fail loudly
+// rather than half-work.
+export const REMOVED_ENV_VARS: Record<string, string> = {
+  SINK_DB_PATH: 'EVENTS_DB_PATH',
+  DB_PATH: 'EVENTS_DB_PATH',
+  MCP_PORT: 'PORT',
+  MCP_HOST: 'HOST',
+  UNIFI_MCP_SERVER_URL: '(removed: UniFi is built in; set UNIFI_HOST and UNIFI_API_KEY)',
+  UNIFI_MCP_SERVER_TOKEN: '(removed: UniFi is built in; set UNIFI_HOST and UNIFI_API_KEY)',
+};
+
 export function loadConfig(): Config {
-  if (!process.env.SINK_DB_PATH?.trim()) {
-    throw new Error('Missing required environment variable: SINK_DB_PATH');
+  for (const [name, replacement] of Object.entries(REMOVED_ENV_VARS)) {
+    if (process.env[name] !== undefined) {
+      throw new Error(`${name} is no longer used; use ${replacement}`);
+    }
   }
 
   if (!process.env.MCP_SECRET?.trim()) {
     throw new Error('Missing required environment variable: MCP_SECRET');
+  }
+  const dashboardPassword = process.env.DASHBOARD_PASSWORD ?? '';
+  if (!dashboardPassword.trim()) {
+    throw new Error('Missing required environment variable: DASHBOARD_PASSWORD');
+  }
+  if (dashboardPassword === process.env.MCP_SECRET) {
+    throw new Error('DASHBOARD_PASSWORD must differ from MCP_SECRET');
+  }
+  const trustProxy = process.env.TRUST_PROXY?.trim() || null;
+  if (trustProxy?.toLowerCase() === 'true') {
+    throw new Error(
+      "TRUST_PROXY must name the proxy (an address, subnet or hop count), never 'true'"
+    );
   }
 
   const validLevels: LogLevel[] = ['error', 'warn', 'info', 'debug'];
@@ -60,17 +123,22 @@ export function loadConfig(): Config {
   return {
     port: parseIntEnv('PORT', 3002),
     host: process.env.HOST ?? '127.0.0.1',
-    sinkDbPath: process.env.SINK_DB_PATH,
+    eventsDbPath: process.env.EVENTS_DB_PATH?.trim() || './data/events.db',
+    retentionDays: parseIntEnv('RETENTION_DAYS', 90),
+    syslogUdpPort: parseIntEnv('SYSLOG_UDP_PORT', 10514),
+    syslogBindAddress: process.env.SYSLOG_BIND_ADDRESS?.trim() || '0.0.0.0',
+    maxMessageBytes: parseIntEnv('MAX_MESSAGE_BYTES', 16384),
     lensDbPath: process.env.LENS_DB_PATH ?? './data/lens.db',
     lanCidrs,
-    unifiMcpServerUrl: process.env.UNIFI_MCP_SERVER_URL?.trim() || null,
-    unifiMcpServerToken: process.env.UNIFI_MCP_SERVER_TOKEN?.trim() || null,
     logLevel: rawLogLevel as LogLevel,
     mcpSecret: process.env.MCP_SECRET,
+    dashboardPassword,
+    trustProxy,
     trustedAdminNames: parseCommaList(process.env.TRUSTED_ADMIN_NAMES),
     safeSignaturePrefixes: process.env.SAFE_SIGNATURE_PREFIXES
       ? parseCommaList(process.env.SAFE_SIGNATURE_PREFIXES)
       : DEFAULT_SAFE_SIGNATURE_PREFIXES,
     homelabServicesPath: process.env.HOMELAB_SERVICES_PATH ?? './data/homelab-services.json',
+    unifi: loadUnifiConfig(),
   };
 }

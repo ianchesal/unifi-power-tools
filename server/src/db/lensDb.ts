@@ -181,6 +181,16 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       );
     `,
   },
+  {
+    // Small per-install values, e.g. the dashboard session-signing secret.
+    version: 6,
+    sql: `
+      CREATE TABLE meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 export function openLensDb(path: string): LensDb {

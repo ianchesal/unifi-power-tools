@@ -14,7 +14,7 @@ vi.mock('../../src/analysis/newEntity.js', async (importOriginal) => {
 });
 
 const { allClientMacs, clientDayCounts, clientLastActivitySince, clientMacsSince, eventsForClientMac } = await import(
-  '../../src/db/sinkQueries.js'
+  '../../src/db/eventQueries.js'
 );
 
 describe('client queries exclude ignored signatures', () => {

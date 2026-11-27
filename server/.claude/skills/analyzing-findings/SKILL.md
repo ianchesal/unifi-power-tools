@@ -1,6 +1,6 @@
 ---
 name: analyzing-findings
-description: Use when asked to analyze, reanalyze, or triage pending findings in unifi-siem-lens — runs the lens's served triage playbook (get_playbook) over the MCP analysis queue, then adds a repo-only check that flags recurring low-risk findings as candidates for a new auto-triage rule.
+description: Use when asked to analyze, reanalyze, or triage pending findings in unifi-power-tools — runs the lens's served triage playbook (get_playbook) over the MCP analysis queue, then adds a repo-only check that flags recurring low-risk findings as candidates for a new auto-triage rule.
 ---
 
 # Analyzing Findings
@@ -11,9 +11,9 @@ checked out.
 
 ## 1. Run the served playbook
 
-Call `mcp__unifi-siem-lens__get_playbook` and follow it for the whole run:
+Call `mcp__unifi-power-tools__get_playbook` and follow it for the whole run:
 procedure, verdict rules, guardrails, rechecks and the final summary. It is the
-source of truth (it is the same text as `/mcp__unifi-siem-lens__triage`), so
+source of truth (it is the same text as `/mcp__unifi-power-tools__triage`), so
 don't substitute your own procedure or restate it here. If the tool isn't
 available, the lens MCP server isn't configured in this session: say so and
 stop.

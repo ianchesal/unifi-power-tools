@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 // Private, per-deployment knowledge of what's actually running on a LAN
 // host (e.g. a homelab server hosting a stack of Docker containers) — never
 // committed to the repo. See homelab-services.example.json for the shape.
-// Loading is tolerant of a missing file, same pattern as openSinkDb/config:
+// Loading is tolerant of a missing file, same pattern as config:
 // this enrichment is optional and must never block startup or analysis.
 
 export interface HomelabService {

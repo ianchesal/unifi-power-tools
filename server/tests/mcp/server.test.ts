@@ -3,24 +3,28 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import { type LensDb, openLensDb } from '../../src/db/lensDb.js';
 import { humanChange, listEntries } from '../../src/db/playbookStore.js';
-import type { SinkDb } from '../../src/db/sinkDb.js';
+import type { EventsDb } from '../../src/db/eventsDb.js';
 import { assemblePlaybook } from '../../src/mcp/playbook/assemble.js';
 import { PLAYBOOK_DEFAULTS } from '../../src/mcp/playbook/defaults.js';
 import { seedPlaybookDefaults } from '../../src/mcp/playbook/seed.js';
-import { createLensMcpServer, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
-import { seededSinkDb } from '../helpers.js';
+import { createMcpServer, type McpDeps, SERVER_INSTRUCTIONS } from '../../src/mcp/server.js';
+import { UNIFI_ONLY_TOOLS } from '../../src/mcp/playbook/core.js';
+import { seededEventsDb, stubUnifiClient } from '../helpers.js';
 
 async function connect({
-  sinkDb,
+  eventsDb = seededEventsDb([]),
   lensDb = openLensDb(':memory:'),
+  unifi = null,
 }: {
-  sinkDb: SinkDb | null;
+  eventsDb?: EventsDb;
   lensDb?: LensDb;
+  unifi?: McpDeps['unifi'];
 }) {
-  const server = createLensMcpServer({
+  const server = createMcpServer({
     lensDb,
-    sinkDb,
-    unifiMcp: { resolveClient: async () => null, getFirewallSummary: async () => null },
+    eventsDb,
+    unifi,
+    enricher: { resolveClient: async () => null, getFirewallSummary: async () => null },
     homelabServices: {},
   }, { trustedAdminNames: ['alice'] });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -29,9 +33,25 @@ async function connect({
   return client;
 }
 
-describe('lens MCP server', () => {
+describe('MCP server', () => {
+  it('lists the event tools: list_events, get_event, get_categories, get_event_stats', async () => {
+    const names = (await (await connect({})).listTools()).tools.map((t) => t.name);
+    for (const n of ['list_events', 'get_event', 'get_categories', 'get_event_stats']) {
+      expect(names).toContain(n);
+    }
+  });
+
+  it('has no duplicate tool names', async () => {
+    const names = (await (await connect({})).listTools()).tools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('identifies itself as unifi-power-tools', async () => {
+    expect((await connect({})).getServerVersion()?.name).toBe('unifi-power-tools');
+  });
+
   it('serves instructions that point at the triage prompt and get_playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const text = client.getInstructions();
     expect(text).toBe(SERVER_INSTRUCTIONS);
     expect(text).toMatch(/triage/);
@@ -39,7 +59,7 @@ describe('lens MCP server', () => {
   });
 
   it('triage prompt returns the assembled playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     expect((await client.listPrompts()).prompts.map((p) => p.name)).toContain('triage');
     const res = await client.getPrompt({ name: 'triage' });
     expect(res.messages).toHaveLength(1);
@@ -48,7 +68,7 @@ describe('lens MCP server', () => {
   });
 
   it('get_playbook returns the same text', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
@@ -56,15 +76,15 @@ describe('lens MCP server', () => {
   });
 
   it('serves the configured trusted admins in the playbook', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
+    const client = await connect({ eventsDb: seededEventsDb([]) });
     const res = (await client.callTool({ name: 'get_playbook', arguments: {} })) as {
       content: { text: string }[];
     };
     expect(res.content[0].text).toMatch(/## Configured trusted admins[\s\S]*- alice/);
   });
 
-  it('still serves the playbook with no sink DB (degraded mode)', async () => {
-    const client = await connect({ sinkDb: null });
+  it('serves instructions and the triage prompt from an empty events DB', async () => {
+    const client = await connect({});
     expect(client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
     expect((await client.getPrompt({ name: 'triage' })).messages).toHaveLength(1);
   });
@@ -78,7 +98,7 @@ describe('lens MCP server', () => {
 
   it('serves an entry accepted after the server was built', async () => {
     const lensDb = openLensDb(':memory:');
-    const client = await connect({ sinkDb: seededSinkDb([]), lensDb });
+    const client = await connect({ eventsDb: seededEventsDb([]), lensDb });
     expect(await playbookText(client)).not.toContain('### [');
 
     const { entry } = humanChange(
@@ -103,20 +123,41 @@ describe('lens MCP server', () => {
       { op: 'edit', entry_id: second.id, title: 'Mine', body: 'my text' },
       '2026-01-02T00:00:00.000Z'
     );
-    const text = await playbookText(await connect({ sinkDb: null, lensDb }));
+    const text = await playbookText(await connect({ lensDb }));
     expect(text).toContain(`### [${first.id}] ${first.title} (default)\n\n`);
     expect(text).toContain(`### [${second.id}] Mine\n\n`);
   });
 
-  it('every lens tool the playbook names is registered', async () => {
-    const client = await connect({ sinkDb: seededSinkDb([]) });
-    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
-    const named = new Set(
-      [...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(/`((?:get|submit|propose|list|mark)_[a-z_]+)`/g)].map((m) => m[1])
+  function namedTools() {
+    return new Set(
+      [
+        ...assemblePlaybook({ trustedAdminNames: ['alice'], entries: [] }).matchAll(
+          /`((?:get|submit|propose|list|mark)_[a-z_]+)`/g
+        ),
+      ].map((m) => m[1])
     );
-    // list_clients belongs to the separate `unifi` MCP server, not the lens.
-    named.delete('list_clients');
+  }
+
+  it('with UniFi off, every always-on tool the playbook names is registered and UniFi-only ones are not', async () => {
+    const registered = new Set((await (await connect({})).listTools()).tools.map((t) => t.name));
+    const named = namedTools();
     expect(named.size).toBeGreaterThan(0);
-    for (const n of named) expect(registered).toContain(n);
+    for (const n of named) {
+      if ((UNIFI_ONLY_TOOLS as readonly string[]).includes(n)) expect(registered).not.toContain(n);
+      else expect(registered).toContain(n);
+    }
+  });
+
+  it('with UniFi configured, every tool the playbook names is registered', async () => {
+    const client = await connect({ unifi: { client: stubUnifiClient, allowWrites: false } });
+    const registered = new Set((await client.listTools()).tools.map((t) => t.name));
+    for (const n of namedTools()) expect(registered).toContain(n);
+    expect(registered).not.toContain('delete_firewall_rule');
+  });
+
+  it('never tells triage to use a write tool', () => {
+    const text = assemblePlaybook({ trustedAdminNames: [], entries: [] });
+    expect(text).toMatch(/Never call UniFi write tools/);
+    expect(text).not.toMatch(/the `unifi` MCP server/);
   });
 });

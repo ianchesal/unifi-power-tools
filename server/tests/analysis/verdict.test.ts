@@ -22,7 +22,7 @@ describe('validateAiVerdict', () => {
 
   it('rejects a close without citations when the sink is unavailable', () => {
     expect(validateAiVerdict(ok, { ...ctx, unblockedIpsAlertsSinceDecision: null })).toBe(
-      'sink DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention'
+      'events DB unavailable; cannot verify every IPS alert was blocked — cite a playbook entry or choose attention'
     );
   });
 
