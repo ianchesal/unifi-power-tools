@@ -1,3 +1,8 @@
+# Fixed project name: container, network and volume names (unifi-power-tools_data)
+# stay the same whatever folder the repo is cloned into, so `docker compose`
+# never needs -p.
+name: unifi-power-tools
+
 services:
   unifi-power-tools:
     build: .
